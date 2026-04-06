@@ -530,7 +530,7 @@ def preprocess_video(
 def clean_detections(
     pts: np.ndarray,
     video_path: str,
-    max_speed_ms: float = 120.0,
+    max_speed_ms: float = 300.0,
     max_gap_linear: int = 3,
     max_gap_physics: int = 8,
     smooth_sigma: float = 1.2,
@@ -563,7 +563,7 @@ def clean_detections(
     # ── A: Static Lock ("Hover") Filter ───────────────────────────────────────
     # A shuttle never hovers. If points stay within a 4-pixel radius 
     # for 3+ consecutive detections, it's a background logo.
-    STATIC_FRAMES = 3
+    STATIC_FRAMES = 10
     STATIC_RADIUS = 4.0
 
     for i in range(N - STATIC_FRAMES + 1):

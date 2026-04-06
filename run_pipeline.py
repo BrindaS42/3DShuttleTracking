@@ -40,7 +40,7 @@ def main():
     ap = argparse.ArgumentParser(description="MonoTrack full pipeline")
 
     # Core inputs
-    ap.add_argument("--video",       default="test_assets/test_video.mp4",
+    ap.add_argument("--video",       default="test_assets/test_video_1.mp4",
                     help="Input video (single shot or full rally)")
     ap.add_argument("--image",       default="test_assets/test_image.jpg",
                     help="Broadcast frame for calibration (Module 1)")

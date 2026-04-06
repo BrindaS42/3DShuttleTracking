@@ -7,3 +7,5 @@ venv310
 tracknet_weights
 *.mp4
 test_assets
+results
+stroke_classification
