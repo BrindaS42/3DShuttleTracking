@@ -4,8 +4,7 @@ __pycache__
 venv
 venv310
 .early.coverage
-tracknet_weights
 *.mp4
 test_assets
 results
-stroke_classification
+

@@ -156,18 +156,18 @@ def reconstruct(shuttle_2d: np.ndarray, P: np.ndarray, hitter_3d, receiver_3d,
 
     initial_guesses = [
         np.r_[W/2, 1.5,  2.2,  0.0, vy_sign*25.0,  5.0, np.log(0.15)], # Mid smash
-        np.r_[W/2, 1.5,  1.1,  0.0, vy_sign*15.0,  8.0, np.log(0.20)], # LOW SERVE/NET (Z=1.1)
-        np.r_[W/2, 1.0,  0.8,  0.0, vy_sign*10.0, 12.0, np.log(0.04)], # VERY LOW LIFT (Z=0.8)
+        # np.r_[W/2, 1.5,  1.1,  0.0, vy_sign*15.0,  8.0, np.log(0.20)], # LOW SERVE/NET
+        # np.r_[W/2, 1.0,  0.8,  0.0, vy_sign*10.0, 12.0, np.log(0.04)], # VERY LOW LIFT
         np.r_[W/2, 2.0,  2.8,  0.0, vy_sign*40.0, -5.0, np.log(0.06)], # Fast Drive
         np.r_[W/2, 1.5, 2.2, 0.0, vy_sign*40.0, 10.0, np.log(0.18)], # Long, high-drag smash
-        np.r_[W/2, 1.2, 1.1, 0.0, vy_sign*15.0, 8.0,  np.log(0.22)], # Low, high-drag serve
+        # np.r_[W/2, 1.2, 1.1, 0.0, vy_sign*15.0, 8.0,  np.log(0.22)], # Low, high-drag serve
     ]
     
     best_res, best_loss = None, float('inf')
     t0  = time.time()
     for p0 in initial_guesses:
         res = minimize(loss, p0, method="L-BFGS-B", bounds=bnds,
-                       options={"maxiter": 2000, "ftol": 1e-12})
+                       options={"maxiter": 2000, "ftol": 1e-9}) 
         if res.fun < best_loss:
             best_loss, best_res = res.fun, res
 

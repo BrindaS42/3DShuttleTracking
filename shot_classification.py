@@ -8,6 +8,7 @@ Key Fixes:
 1. Synchronized normalize_rally_data signature to use H_court.
 2. Implemented Edge-Padding for hits near start/end to prevent "Unknown" collapse.
 3. Integrated English translation map for match reporting.
+4. Synchronized cache paths with reconstruct.py (marked_hits.json & shuttle_2d.npy)
 """
 
 import argparse
@@ -32,7 +33,7 @@ if str(BST_ROOT.resolve()) not in sys.path:
 from config import (
     VIDEO_PATH, SHUTTLE_OUT, POSE_OUT, CALIB_OUT_DIR,
     TRACKNET_DIR, COURT_W, COURT_L,
-    WORLD_PTS,
+    WORLD_PTS, TRAJ_OUT  # Added TRAJ_OUT to sync with reconstruct.py
 )
 from court_calibration import load_calibration
 from shuttle_detection import run_tracknet, parse_tracknet_csv, render_debug_video
@@ -198,17 +199,17 @@ def dump_annotated_rally(frames, global_shuttle, global_poses, hit_results, out_
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video", default="test_assets/match_short.mp4")
+    ap.add_argument("--video", default="test_assets/half_rally.mp4")
     ap.add_argument("--weight", default="weight/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged.pt")
-    ap.add_argument("--first_hitter", choices=["near","far"], default="far")
+    ap.add_argument("--first_hitter", choices=["near","far"], default="near")
     ap.add_argument("--annotate", action="store_true", default=True)
     args = ap.parse_args()
 
     out_dir = Path("results/classif_out")
     logger = setup_logging(out_dir)
 
-    # 1. Hit Marking
-    hits_cache = out_dir / "marked_hits.json"
+    # 1. Hit Marking (Synced with reconstruct.py TRAJ_OUT)
+    hits_cache = Path(TRAJ_OUT) / "marked_hits.json"
     hit_frames = []
     if hits_cache.exists():
         if input(f"\n[?] Reuse hits at {hits_cache}? (y/n): ").lower() == 'y':
@@ -216,6 +217,7 @@ def main():
             logger.info(f"Loaded {len(hit_frames)} hits.")
     if not hit_frames:
         hit_frames = mark_hits_ui(args.video)
+        hits_cache.parent.mkdir(parents=True, exist_ok=True)
         with open(hits_cache, "w") as f: json.dump(hit_frames, f)
 
     cap = cv2.VideoCapture(args.video)
@@ -229,7 +231,7 @@ def main():
 
     # 2. Global Pose Estimation
     pose_cache = Path(POSE_OUT) / "poses.pkl"
-    if pose_cache.exists() and input("[?] Use cached poses? (y/n): ").lower() == 'y':
+    if pose_cache.exists() and input(f"[?] Use cached poses at {pose_cache}? (y/n): ").lower() == 'y':
         with open(pose_cache, "rb") as f: global_poses = pickle.load(f)
     else:
         cap2 = cv2.VideoCapture(args.video); frames_list = []
@@ -242,9 +244,9 @@ def main():
         global_poses = estimate_poses_batched(frames_list, K, rvec, tvec, det_m, pose_m, batch_size=16)
         with open(pose_cache, "wb") as f: pickle.dump(global_poses, f)
 
-    # 3. Shuttle Detection
-    shuttle_cache = Path(SHUTTLE_OUT) / "global_shuttle_interpolated.npy"
-    if shuttle_cache.exists() and input("[?] Use cached shuttle? (y/n): ").lower() == 'y':
+    # 3. Shuttle Detection (Synced with reconstruct.py SHUTTLE_OUT)
+    shuttle_cache = Path(SHUTTLE_OUT) / "shuttle_2d.npy"
+    if shuttle_cache.exists() and input(f"[?] Use cached shuttle at {shuttle_cache}? (y/n): ").lower() == 'y':
         global_shuttle = np.load(shuttle_cache)
     else:
         csv_path = run_tracknet(args.video, TRACKNET_DIR, SHUTTLE_OUT, eval_mode="average")
@@ -270,8 +272,6 @@ def main():
         current_hitter = hitter_cycle[i % 2]
         
         # 1. Define strict boundaries for THIS specific shot
-        # Prev boundary: halfway to the previous hit
-        # Next boundary: halfway to the next hit
         prev_h = hit_frames[i-1] if i > 0 else max(0, hit_idx - 25)
         next_h = hit_frames[i+1] if i < len(hit_frames)-1 else min(n_total, hit_idx + 25)
         
@@ -302,10 +302,6 @@ def main():
         bones = create_bones(j_win, bone_pairs)
         hp_in = np.concatenate((j_win, bones), axis=-2)
         
-        # ... (keep your Tensor Prep code above) ...
-
-        # ... [Keep your existing tensor preparation and logits calculation] ...
-        
         with torch.no_grad():
             hp_t = torch.tensor(hp_in).unsqueeze(0).to(device).view(1, 100, 2, -1)
             sh_t = torch.tensor(s_win).unsqueeze(0).to(device)
@@ -320,19 +316,6 @@ def main():
         all_types = get_merged_stroke_types()
         final_pred_idx = sorted_indices[0].item() # Fallback
         found_valid = False
-
-        # --- STEP 1: Special Handling for Hit 1 (The Serve) ---
-        # if i == 0:
-        #     for idx in sorted_indices:
-        #         cand_idx = idx.item()
-        #         cand_e = translate_stroke(all_types[cand_idx])
-        #         cand_prefix = "near" if "Bottom" in cand_e else "far"
-                
-        #         # Look for a Service matching the side
-        #         if cand_prefix == expected_side and "Service" in cand_e:
-        #             final_pred_idx = cand_idx
-        #             found_valid = True
-        #             break
 
         # --- STEP 2: General Filter (Side Match & Skip Unknown) ---
         if not found_valid:
