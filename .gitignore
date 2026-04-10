@@ -1,10 +1,13 @@
 *.pt
 *.pth
 __pycache__
+__pycache__lakshya
 venv
 venv310
 .early.coverage
 *.mp4
 test_assets
 results
-
+results_lakshya
+Shuttleset
+test_shuttlenet

@@ -159,7 +159,10 @@ def run_tracknet(
         "--save_dir",       str(raw_dir),   # absolute — no path doubling
         "--eval_mode",      eval_mode,
         "--batch_size",     str(batch_size),
+        "--max_sample_num", "150"  # <── PREVENTS 4.8GB RAM CRASH!
     ]
+    if large_video:
+        cmd.append("--large_video")
     if large_video:
         cmd.append("--large_video")
 
@@ -525,30 +528,24 @@ def preprocess_video(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 4b — ROBUST CLEANING  (replaces smooth + interpolate in main pipeline)
+#  STEP 4b — ROBUST CLEANING (Speed Filter + Infinite Gap Fill)
 # ─────────────────────────────────────────────────────────────────────────────
 def clean_detections(
     pts: np.ndarray,
     video_path: str,
+    hit_frames: list = None,
     max_speed_ms: float = 300.0,
-    max_gap_linear: int = 3,
-    max_gap_physics: int = 8,
-    smooth_sigma: float = 1.2,
+    smooth_sigma: float = 1.5, # Safe to crank this up now!
 ) -> np.ndarray:
     """
-    Physics-based post-processing pipeline.
-    Removed the brittle 'banner_frac' and replaced it with a 'Static Lock' filter.
+    Shot-by-Shot physics-based post-processing with Anchored Endpoints.
+    Pins the hit frames to their exact raw coordinates while heavily 
+    smoothing the flight path in between.
     """
     cap   = cv2.VideoCapture(str(video_path))
     fps   = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
     img_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     img_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    frames_gray = []
-    while True:
-        ok, f = cap.read()
-        if not ok: break
-        frames_gray.append(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY))
     cap.release()
 
     N   = len(pts)
@@ -557,72 +554,11 @@ def clean_detections(
     px_per_m         = img_w * 0.55 / 6.7
     max_px_per_frame = max_speed_ms / fps * px_per_m * 1.4
 
-    removed_static = removed_speed = removed_motion = 0
-    filled_linear  = filled_physics = 0
+    removed_speed = 0
+    filled_linear  = 0
+    filled_physics = 0
 
-    # ── A: Static Lock ("Hover") Filter ───────────────────────────────────────
-    # A shuttle never hovers. If points stay within a 4-pixel radius 
-    # for 3+ consecutive detections, it's a background logo.
-    STATIC_FRAMES = 10
-    STATIC_RADIUS = 4.0
-
-    for i in range(N - STATIC_FRAMES + 1):
-        window = out[i : i + STATIC_FRAMES]
-        # Check if the whole window contains valid detections
-        if not np.any(np.isnan(window)):
-            # Calculate the max distance between any two points in this window
-            max_dist = 0
-            for p1 in window:
-                for p2 in window:
-                    dist = np.linalg.norm(p1 - p2)
-                    if dist > max_dist:
-                        max_dist = dist
-            
-            # If the points barely moved, it's a static background lock.
-            if max_dist < STATIC_RADIUS:
-                out[i : i + STATIC_FRAMES] = np.nan
-                removed_static += STATIC_FRAMES
-
-    # ── B: Speed Filter (Impossible jumps) ────────────────────────────────────
-    prev_i = None
-    for i in range(N):
-        if np.any(np.isnan(out[i])):
-            prev_i = None
-            continue
-        if prev_i is not None:
-            dist  = float(np.linalg.norm(out[i] - out[prev_i]))
-            limit = max_px_per_frame * (i - prev_i)
-            if dist > limit:
-                out[i] = np.nan
-                removed_speed += 1
-                continue
-        prev_i = i
-
-    # ── C: Motion Gate (Tightened) ────────────────────────────────────────────
-    # Shrunk search radius from 32 to 8. This prevents players running nearby 
-    # from triggering a false positive motion validation.
-    SEARCH_R   = 8     
-    MOT_THRESH = 12.0  
- 
-    for i in range(N):
-        if np.any(np.isnan(out[i])):
-            continue
-        pf, nf = i - 1, i + 1
-        if pf < 0 or nf >= len(frames_gray):
-            continue 
- 
-        u, v = int(out[i, 0]), int(out[i, 1])
-        x1 = max(0, u - SEARCH_R);  x2 = min(img_w, u + SEARCH_R)
-        y1 = max(0, v - SEARCH_R);  y2 = min(img_h, v + SEARCH_R)
- 
-        pp = frames_gray[pf][y1:y2, x1:x2].astype(np.float32)
-        pn = frames_gray[nf][y1:y2, x1:x2].astype(np.float32)
- 
-        if float(np.max(np.abs(pn - pp))) < MOT_THRESH:
-            out[i] = np.nan
-            removed_motion += 1
-
-    # ── D: Gap Fill ───────────────────────────────────────────────────────────
+    # Helper for physics fill
     def _physics_fill(p0, p1, gap, fps_):
         t_total = (gap + 1) / fps_
         ts      = np.arange(1, gap + 1) / fps_
@@ -633,51 +569,103 @@ def clean_detections(
         filled_y = p0[1] + vy * ts + 0.5 * g_px * ts**2
         return np.stack([filled_x, filled_y], axis=1)
 
-    i = 0
-    while i < N:
-        if not np.any(np.isnan(out[i])):
-            i += 1
-            continue
+    # ── Define Shot Boundaries ──
+    hit_frames = hit_frames or []
+    intervals = []
+    start_idx = 0
+    for hf in hit_frames:
+        if hf > start_idx:
+            intervals.append((start_idx, hf + 1)) # +1 to include the hit frame
+        start_idx = hf
+    if start_idx < N:
+        intervals.append((start_idx, N))
 
-        j = i
-        while j < N and np.any(np.isnan(out[j])):
-            j += 1
-        gap = j - i
+    # ── Process each shot independently ──
+    from scipy.ndimage import gaussian_filter1d
+    
+    for start, end in intervals:
+        # A: Speed Filter
+        prev_i = None
+        for i in range(start, end):
+            if np.any(np.isnan(out[i])):
+                continue
+            if prev_i is not None:
+                dist  = float(np.linalg.norm(out[i] - out[prev_i]))
+                limit = max_px_per_frame * (i - prev_i)
+                if dist > limit:
+                    out[i] = np.nan
+                    removed_speed += 1
+                    continue
+            prev_i = i
 
-        if i > 0 and j < N:
-            p0 = out[i - 1]
-            p1 = out[j]
+        # B: Gap Fill
+        i = start
+        while i < end:
+            if not np.any(np.isnan(out[i])):
+                i += 1
+                continue
 
-            if gap <= max_gap_linear:
-                for col in range(2):
-                    out[i:j, col] = np.linspace(p0[col], p1[col], gap + 2)[1:-1]
-                filled_linear += gap
+            j = i
+            while j < end and np.any(np.isnan(out[j])):
+                j += 1
+            gap = j - i
 
-            elif gap <= max_gap_physics:
-                try:
-                    arc = _physics_fill(p0, p1, gap, fps)
-                    arc[:, 0] = np.clip(arc[:, 0], 0, img_w - 1)
-                    arc[:, 1] = np.clip(arc[:, 1], 0, img_h - 1)
-                    out[i:j] = arc
-                    filled_physics += gap
-                except Exception:
+            if i > start and j < end:
+                p0 = out[i - 1]
+                p1 = out[j]
+
+                if gap <= 8:
+                    try:
+                        arc = _physics_fill(p0, p1, gap, fps)
+                        arc[:, 0] = np.clip(arc[:, 0], 0, img_w - 1)
+                        arc[:, 1] = np.clip(arc[:, 1], 0, img_h - 1)
+                        out[i:j] = arc
+                        filled_physics += gap
+                    except Exception:
+                        for col in range(2):
+                            out[i:j, col] = np.linspace(p0[col], p1[col], gap + 2)[1:-1]
+                        filled_linear += gap
+                else:
                     for col in range(2):
                         out[i:j, col] = np.linspace(p0[col], p1[col], gap + 2)[1:-1]
                     filled_linear += gap
-        i = j
+            i = j
+            
+        # C: Gaussian Smooth (With Anchored Endpoints!)
+        shot_mask = ~np.any(np.isnan(out[start:end]), axis=1)
+        if shot_mask.sum() >= 4:
+            valid_indices = np.where(shot_mask)[0]
+            
+            for col in range(2):
+                # 1. Extract the valid coordinates for this shot
+                raw_vals = out[start:end][valid_indices, col].copy()
+                
+                # 2. Apply the heavy Gaussian smoothing
+                smoothed_vals = gaussian_filter1d(raw_vals, sigma=smooth_sigma)
+                
+                # 3. Calculate the "Corner Cutting" error at the exact boundaries
+                err_start = raw_vals[0] - smoothed_vals[0]
+                err_end   = raw_vals[-1] - smoothed_vals[-1]
+                
+                # 4. Create a linear gradient to smoothly bridge the error across the flight
+                correction = np.linspace(err_start, err_end, len(raw_vals))
+                
+                # 5. Apply the correction so the endpoints are pinned to their raw values
+                out[start:end][valid_indices, col] = smoothed_vals + correction
 
-    # ── E: Gaussian Smooth ────────────────────────────────────────────────────
-    mask = ~np.any(np.isnan(out), axis=1)
-    if mask.sum() >= 4:
-        for col in range(2):
-            out[mask, col] = gaussian_filter1d(out[mask, col], sigma=smooth_sigma)
+    # ── Edge Padding (Global) ──
+    first_valid = np.where(~np.any(np.isnan(out), axis=1))[0]
+    if len(first_valid) > 0:
+        fv, lv = first_valid[0], first_valid[-1]
+        if fv > 0:
+            out[:fv] = out[fv]
+        if lv < N - 1:
+            out[lv+1:] = out[lv]
 
-    print(f"  clean_detections: "
-          f"−{removed_static} static/hover  −{removed_speed} speed jumps  "
-          f"−{removed_motion} static pixel  "
+    print(f"  clean_detections (Anchored Smoothing): "
+          f"−{removed_speed} speed jumps  "
           f"+{filled_linear} linear  +{filled_physics} physics")
     return out
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  ENTRY POINT
@@ -703,7 +691,7 @@ Examples
     )
 
     # ── Our args ──────────────────────────────────────────────────────────────
-    ap.add_argument("--video",    default=str(VIDEO_PATH),
+    ap.add_argument("--video",    default="test_assets/half_rally.mp4",
                     help="Path to input video clip")
     ap.add_argument("--tracknet", default=str(TRACKNET_DIR),
                     help="Folder containing predict.py, TrackNet_best.pt, "
@@ -715,8 +703,8 @@ Examples
     ap.add_argument("--tn_eval_mode",  default="weight",
                     choices=["nonoverlap", "average", "weight"],
                     help="TrackNetV3 --eval_mode  (default: weight)")
-    ap.add_argument("--tn_batch_size", type=int, default=4,
-                    help="TrackNetV3 --batch_size  (default: 16)")
+    ap.add_argument("--tn_batch_size", type=int, default=8,
+                    help="TrackNetV3 --batch_size  (default: 8)")
     ap.add_argument("--tn_large_video", action="store_true",
                     help="Pass --large_video to TrackNetV3 for long matches")
 

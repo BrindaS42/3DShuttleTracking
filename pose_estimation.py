@@ -46,6 +46,7 @@ _L_HIP,   _R_HIP   = 11, 12
 def load_pose_backend():
     """Directly loads RTMPose-m."""
     try:
+        import torch
         import mmdet, mmpose
         from mmpose.apis import init_model
         from mmdet.apis import init_detector
@@ -57,12 +58,15 @@ def load_pose_backend():
         det_config = os.path.join(os.path.dirname(mmdet.__file__), '.mim', 'configs', 'rtmdet', 'rtmdet_tiny_8xb32-300e_coco.py')
         pose_config = os.path.join(os.path.dirname(mmpose.__file__), '.mim', 'configs', 'body_2d_keypoint', 'rtmpose', 'coco', 'rtmpose-m_8xb256-420e_coco-256x192.py')
 
-        det = init_detector(det_config, "https://download.openmmlab.com/mmdetection/v3.0/rtmdet/rtmdet_tiny_8xb32-300e_coco/rtmdet_tiny_8xb32-300e_coco_20220902_112414-78e30dcc.pth", device="cpu")
+        # ── DYNAMICALLY ASSIGN GPU ──
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        det = init_detector(det_config, "https://download.openmmlab.com/mmdetection/v3.0/rtmdet/rtmdet_tiny_8xb32-300e_coco/rtmdet_tiny_8xb32-300e_coco_20220902_112414-78e30dcc.pth", device=device)
         
         pipeline = det.cfg.test_dataloader.dataset.pipeline
         det.cfg.test_dataloader.dataset.pipeline = [p for p in pipeline if 'LoadAnnotations' not in p.get('type', '')]
         
-        pose = init_model(pose_config, "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-m_simcc-coco_pt-aic-coco_420e-256x192-d8dd5ca4_20230127.pth", device="cpu")
+        pose = init_model(pose_config, "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-m_simcc-coco_pt-aic-coco_420e-256x192-d8dd5ca4_20230127.pth", device=device)
         return det, pose, "rtmpose"
     except Exception as e:
         print(f"[Pose] RTMPose Error: {e}")
