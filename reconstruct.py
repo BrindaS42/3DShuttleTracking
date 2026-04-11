@@ -115,17 +115,24 @@ def validate_and_interpolate_poses(poses, fps):
 
 def main():
     ap = argparse.ArgumentParser(description="MonoTrack Full GPU Pipeline")
+    # Core Inputs
     ap.add_argument("--video",       default="test_assets/half_rally.mp4")
+    ap.add_argument("--image",       default="test_assets/test_image.jpg", help="Frame for calibration")
     ap.add_argument("--tracknet",    default="tracknet_weights")
-    ap.add_argument("--first_hitter",choices=["near", "far"], default="near",
-                    help="WARNING: Ensure this matches the actual first hit in the video!")
+    ap.add_argument("--first_hitter",choices=["near", "far"], default="near")
+    
+    # Paths
     ap.add_argument("--calib_dir",   default="results/calib_out")
     ap.add_argument("--shuttle_dir", default="results/shuttle_out")
     ap.add_argument("--pose_dir",    default="results/pose_out")
     ap.add_argument("--traj_dir",    default="results/traj_out")
-    ap.add_argument("--tn_batch_size", type=int, default=4)
-    ap.add_argument("--pose_batch_size", type=int, default=4)
-    ap.add_argument("--traj_workers", type=int, default=6)
+
+    # Execution Params
+    ap.add_argument("--pose_batch_size", type=int, default=8)
+    ap.add_argument("--traj_workers",    type=int, default=6)
+    ap.add_argument("--preprocess",      action="store_true", help="Background-subtract video for TrackNet")
+    
+    # Skip Flags
     ap.add_argument("--skip_calib",  action="store_true")
     ap.add_argument("--skip_shuttle",action="store_true")
     ap.add_argument("--skip_pose",   action="store_true")
@@ -137,7 +144,7 @@ def main():
 
     sep = "─" * 60
 
-    print(f"\n{sep}\nMODULE 0 — Hit Frame Selection\n{sep}")
+    # ── MODULE 0 — Hit Frame Selection ──
     out_traj = Path(args.traj_dir)
     out_traj.mkdir(parents=True, exist_ok=True)
     hits_cache = out_traj / "marked_hits.json"
@@ -147,7 +154,6 @@ def main():
         ans = input(f"[?] Reuse existing hits from {hits_cache}? (y/n): ").lower()
         if ans == 'y':
             with open(hits_cache, "r") as f: hit_frames = json.load(f)
-            print(f"Loaded {len(hit_frames)} hits.")
     
     if not hit_frames:
         hit_frames = mark_hits_ui(args.video)
@@ -158,16 +164,80 @@ def main():
     n_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
+    # ── MODULE 1 — Court Calibration ──
     if not args.skip_calib:
-        pass # Handle Calibration
-    else: print("Module 1 skipped.")
+        print(f"\n{sep}\nMODULE 1 — Court Calibration\n{sep}")
+        from court_calibration import calibrate, verify_and_save, save_calibration
+        out = Path(args.calib_dir)
+        out.mkdir(parents=True, exist_ok=True)
 
+        # Extract the 3rd frame (index 2) from the video for calibration
+        cap = cv2.VideoCapture(args.video)
+        if not cap.isOpened():
+            raise IOError(f"Could not open video: {args.video}")
+        
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 2)  # Seek to frame index 2 (3rd frame)
+        ret, calib_frame = cap.read()
+        cap.release()
+
+        if not ret:
+            raise RuntimeError("Failed to extract frame 3 from video for calibration.")
+
+        # Save extracted frame to the calibration directory
+        calib_img_path = str(out / "calib_source_frame.jpg")
+        cv2.imwrite(calib_img_path, calib_frame)
+        print(f"Extracted calibration frame saved to: {calib_img_path}")
+
+        # Run calibration using the extracted frame
+        P, K, rvec, tvec, img_pts = calibrate(calib_img_path)
+        verify_and_save(P, K, rvec, tvec, img_pts, calib_img_path, out)
+        save_calibration(P, K, rvec, tvec, out)
+        print("Module 1 done.\n")
+    else:
+        print("Module 1 skipped.")
+
+    # ── MODULE 2 — Shuttle Detection ──
     if not args.skip_shuttle:
-        pass # Handle Shuttle Detection
+        print(f"\n{sep}\nMODULE 2 — Shuttle Detection\n{sep}")
+        from shuttle_detection import (
+            preprocess_video, run_tracknet, parse_tracknet_csv, 
+            clean_detections, detection_stats, save_shuttle, save_stats, render_debug_video
+        )
+        out = Path(args.shuttle_dir)
+        track_input = args.video
+        if args.preprocess:
+            track_input = preprocess_video(args.video, str(out / "preprocessed.mp4"))
+
+        csv_path = run_tracknet(track_input, args.tracknet, str(out), eval_mode="weight", batch_size=4)
+        shuttle_2d = parse_tracknet_csv(csv_path, args.video)
+        shuttle_2d = clean_detections(shuttle_2d, args.video, hit_frames=hit_frames)
+        
+        save_shuttle(shuttle_2d, out)
+        save_stats(detection_stats(shuttle_2d), out)
+        render_debug_video(args.video, shuttle_2d, str(out / "shuttle_detection.mp4"))
     else: print("Module 2 skipped.")
 
+    # ── MODULE 3 — Pose Estimation (BATCHED) ──
     if not args.skip_pose:
-        pass # Handle Pose Estimation
+        print(f"\n{sep}\nMODULE 3 — Pose Estimation\n{sep}")
+        from court_calibration import load_calibration
+        from pose_estimation import load_pose_backend, estimate_poses_batched, save_poses, render_pose_debug
+        
+        out = Path(args.pose_dir)
+        P, K, rvec, tvec = load_calibration(args.calib_dir)
+        
+        cap = cv2.VideoCapture(args.video)
+        frames = []
+        while True:
+            ok, f = cap.read()
+            if not ok: break
+            frames.append(f)
+        cap.release()
+        
+        det_m, pose_m, _ = load_pose_backend()
+        poses = estimate_poses_batched(frames, K, rvec, tvec, det_m, pose_m, batch_size=args.pose_batch_size)
+        save_poses(poses, out)
+        render_pose_debug(frames, poses, fps, str(out / "pose_debug.mp4"))
     else: print("Module 3 skipped.")
 
     print(f"\n{sep}\nMODULE 4 — Parallel 3D Trajectory Reconstruction\n{sep}")
