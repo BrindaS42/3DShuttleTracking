@@ -3,12 +3,6 @@ shot_classification.py
 ══════════════════════
 Optimized Rally Analyzer: Hit-Centered context windows, Edge Padding,
 Hitter Alternation, and English-Chinese stroke reporting.
-
-Key Fixes:
-1. Synchronized normalize_rally_data signature to use H_court.
-2. Implemented Edge-Padding for hits near start/end to prevent "Unknown" collapse.
-3. Integrated English translation map for match reporting.
-4. Synchronized cache paths with reconstruct.py (marked_hits.json & shuttle_2d.npy)
 """
 
 import argparse
@@ -25,7 +19,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-# ── BST repo on sys.path ──────────────────────────────────────────────────────
 BST_ROOT = Path(__file__).parent / "stroke_classification"
 if str(BST_ROOT.resolve()) not in sys.path:
     sys.path.insert(0, str(BST_ROOT.resolve()))
@@ -33,7 +26,7 @@ if str(BST_ROOT.resolve()) not in sys.path:
 from config import (
     VIDEO_PATH, SHUTTLE_OUT, POSE_OUT, CALIB_OUT_DIR,
     TRACKNET_DIR, COURT_W, COURT_L,
-    WORLD_PTS, TRAJ_OUT  # Added TRAJ_OUT to sync with reconstruct.py
+    WORLD_PTS, TRAJ_OUT  
 )
 from court_calibration import load_calibration
 from shuttle_detection import run_tracknet, parse_tracknet_csv, render_debug_video
@@ -46,10 +39,6 @@ from stroke_classification.model.bst import BST_CG_AP
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MAPPING & LOGGING
-# ══════════════════════════════════════════════════════════════════════════════
-
 STROKE_MAP = {
     "放小球": "Net Shot", "擋小球": "Net Block", "殺球": "Smash",
     "點扣": "Wrist Smash", "挑球": "Lob", "防守回挑": "Defensive Lob",
@@ -60,7 +49,6 @@ STROKE_MAP = {
 }
 
 def translate_stroke(chinese_stroke):
-    """Splits prefix (Top/Bottom) and translates the stroke name."""
     if "_" in chinese_stroke:
         prefix, name = chinese_stroke.split("_")
         return f"{prefix}_{STROKE_MAP.get(name, name)}"
@@ -78,11 +66,7 @@ def setup_logging(out_dir):
     )
     return logging.getLogger("RallyAnalyzer")
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HOMOGRAPHY & GAP FILL
-# ══════════════════════════════════════════════════════════════════════════════
-
-_FLOOR_CORNER_IDX = [0, 1, 2, 3] # Near-L, Near-R, Far-R, Far-L
+_FLOOR_CORNER_IDX = [0, 1, 2, 3] 
 _COURT_DST = np.array([[0, 1], [1, 1], [1, 0], [0, 0]], dtype=np.float32)
 
 def build_court_homography(K, rvec, tvec) -> np.ndarray:
@@ -107,10 +91,6 @@ def fill_linear_shuttle_gaps(shuttle_2d, max_gap=30):
             filled[idx_s:idx_e + 1] = np.linspace(shuttle_2d[idx_s], shuttle_2d[idx_e], gap + 1)
     return filled
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  NORMALIZATION
-# ══════════════════════════════════════════════════════════════════════════════
-
 _L_ANKLE, _R_ANKLE = 15, 16
 
 def normalize_rally_data(poses, shuttle_2d, v_w, v_h, n_frames, H_court):
@@ -132,7 +112,7 @@ def normalize_rally_data(poses, shuttle_2d, v_w, v_h, n_frames, H_court):
                 dist = max(float(np.linalg.norm(bx[2:] - bx[:2])), 1e-6)
                 center = (bx[:2] + bx[2:]) / 2
                 joints[i, p_idx] = (kps - bx[:2]) / dist - (center - bx[:2]) / dist
-                if p_idx == 1: detected_j += 1 # Tracking Far player joints
+                if p_idx == 1: detected_j += 1
 
                 la, ra = kps[_L_ANKLE], kps[_R_ANKLE]
                 ankles = [px for px in [la, ra] if not (px[0] == 0.0 and px[1] == 0.0)]
@@ -140,10 +120,6 @@ def normalize_rally_data(poses, shuttle_2d, v_w, v_h, n_frames, H_court):
                 pos[i, p_idx] = pixel_to_court_norm(u_avg, v_avg, H_court)
 
     return joints, pos, shuttle, detected_j
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  UI & RENDERING
-# ══════════════════════════════════════════════════════════════════════════════
 
 def mark_hits_ui(video_path):
     cap = cv2.VideoCapture(str(video_path))
@@ -193,14 +169,10 @@ def dump_annotated_rally(frames, global_shuttle, global_poses, hit_results, out_
         writer.write(out)
     writer.release()
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", default="test_assets/half_rally.mp4")
-    ap.add_argument("--weight", default="weight/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged.pt")
+    ap.add_argument("--weight", default="weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged.pt")
     ap.add_argument("--first_hitter", choices=["near","far"], default="near")
     ap.add_argument("--annotate", action="store_true", default=True)
     args = ap.parse_args()
@@ -208,7 +180,6 @@ def main():
     out_dir = Path("results/classif_out")
     logger = setup_logging(out_dir)
 
-    # 1. Hit Marking (Synced with reconstruct.py TRAJ_OUT)
     hits_cache = Path(TRAJ_OUT) / "marked_hits.json"
     hit_frames = []
     if hits_cache.exists():
@@ -229,7 +200,6 @@ def main():
     P, K, rvec, tvec = load_calibration(CALIB_OUT_DIR)
     H_court = build_court_homography(K, rvec, tvec)
 
-    # 2. Global Pose Estimation
     pose_cache = Path(POSE_OUT) / "poses.pkl"
     if pose_cache.exists() and input(f"[?] Use cached poses at {pose_cache}? (y/n): ").lower() == 'y':
         with open(pose_cache, "rb") as f: global_poses = pickle.load(f)
@@ -244,7 +214,6 @@ def main():
         global_poses = estimate_poses_batched(frames_list, K, rvec, tvec, det_m, pose_m, batch_size=16)
         with open(pose_cache, "wb") as f: pickle.dump(global_poses, f)
 
-    # 3. Shuttle Detection (Synced with reconstruct.py SHUTTLE_OUT)
     shuttle_cache = Path(SHUTTLE_OUT) / "shuttle_2d.npy"
     if shuttle_cache.exists() and input(f"[?] Use cached shuttle at {shuttle_cache}? (y/n): ").lower() == 'y':
         global_shuttle = np.load(shuttle_cache)
@@ -254,7 +223,6 @@ def main():
         np.save(shuttle_cache, global_shuttle)
         render_debug_video(args.video, global_shuttle, str(Path(SHUTTLE_OUT) / "shuttle_debug.mp4"))
 
-    # 4. BST Inference
     logger.info("Normalising data for BST...")
     joints, pos_norm, shuttle_norm, detected_j = normalize_rally_data(global_poses, global_shuttle, v_w, v_h, n_total, H_court)
     
@@ -271,33 +239,24 @@ def main():
     for i, hit_idx in enumerate(hit_frames):
         current_hitter = hitter_cycle[i % 2]
         
-        # 1. Define strict boundaries for THIS specific shot
         prev_h = hit_frames[i-1] if i > 0 else max(0, hit_idx - 25)
         next_h = hit_frames[i+1] if i < len(hit_frames)-1 else min(n_total, hit_idx + 25)
         
-        # 2. Extract context window [hit-50, hit+50]
         start, end = hit_idx - 50, hit_idx + 50
         
-        # 3. Create isolated tensors (initialized to zero)
         j_win = np.zeros((100, 2, 17, 2), dtype=np.float32)
         p_win = np.zeros((100, 2, 2),     dtype=np.float32)
         s_win = np.zeros((100, 2),        dtype=np.float32)
 
-        # 4. Fill ONLY the relevant segment [prev_h, next_h] into the 100-frame window
         for offset in range(-50, 50):
             abs_frame = hit_idx + offset
             target_idx = offset + 50
-            
-            # Strict Isolation: Only use data between the previous and next hits
             if prev_h <= abs_frame <= next_h and 0 <= abs_frame < n_total:
                 j_win[target_idx] = joints[abs_frame]
                 p_win[target_idx] = pos_norm[abs_frame]
                 s_win[target_idx] = shuttle_norm[abs_frame]
 
-        # Calculate actual length of the visible movement for the model's forward pass
         real_len = (next_h - prev_h)
-        
-        # 5. Collate and Bone creation
         bone_pairs = get_bone_pairs('coco')
         bones = create_bones(j_win, bone_pairs)
         hp_in = np.concatenate((j_win, bones), axis=-2)
@@ -306,24 +265,20 @@ def main():
             hp_t = torch.tensor(hp_in).unsqueeze(0).to(device).view(1, 100, 2, -1)
             sh_t = torch.tensor(s_win).unsqueeze(0).to(device)
             ps_t = torch.tensor(p_win).unsqueeze(0).to(device)
-            
             logits = net(hp_t, sh_t, ps_t, torch.tensor([100]).to(device))
-            
             probs = torch.softmax(logits, dim=1)
             sorted_indices = torch.argsort(probs, dim=1, descending=True)[0]
 
         expected_side = hitter_cycle[i % 2]
         all_types = get_merged_stroke_types()
-        final_pred_idx = sorted_indices[0].item() # Fallback
+        final_pred_idx = sorted_indices[0].item() 
         found_valid = False
 
-        # --- STEP 2: General Filter (Side Match & Skip Unknown) ---
         if not found_valid:
             for idx in sorted_indices:
                 cand_idx = idx.item()
                 cand_e = translate_stroke(all_types[cand_idx])
                 
-                # Ignore 'Unknown' unless it's literally the only choice
                 if "Unknown" in cand_e and len(sorted_indices) > 1:
                     continue
                 
@@ -333,16 +288,10 @@ def main():
                     found_valid = True
                     break
 
-        # Final Translation
         e_stroke = translate_stroke(all_types[final_pred_idx])
-        
-        hit_results.append({
-            'Hit #': i+1, 'Frame': hit_idx, 
-            'Hitter': expected_side, 'Stroke': e_stroke
-        })
+        hit_results.append({'Hit #': i+1, 'Frame': hit_idx, 'Hitter': expected_side, 'Stroke': e_stroke})
         logger.info(f" Hit {i+1:2d} | f{hit_idx:3d} | Hitter: {expected_side:4s} | Result: {e_stroke}")
 
-    # 5. Report & Video
     df = pd.DataFrame(hit_results)
     df.to_excel(out_dir / "rally_summary.xlsx", index=False)
     if args.annotate:
