@@ -328,7 +328,7 @@ def main():
     shuttle_cache = shuttle_dir / "shuttle_trimmed.npy"
     use_shuttle_cache = False
     if shuttle_cache.exists():
-        if input(f"Cached shuttle detections found. Use it? (y/n): ").strip().lower() == 'y':
+        if input(f"Cached raw shuttle detections found. Use it? (y/n): ").strip().lower() == 'y':
             use_shuttle_cache = True
             
     if use_shuttle_cache:
@@ -338,10 +338,14 @@ def main():
         csv_path = run_tracknet(video_path=trimmed_video_path, weights_dir=str(TRACKNET_DIR), raw_out_dir=str(shuttle_dir), eval_mode="weight", batch_size=4, large_video=True)
         trimmed_shuttle = parse_tracknet_csv(csv_path, trimmed_video_path) 
         
-        logger.info("Cleaning false positive detections...")
-        trimmed_shuttle = clean_detections(trimmed_shuttle, trimmed_video_path)
-        trimmed_shuttle = fill_linear_shuttle_gaps(trimmed_shuttle, max_gap=30)
+        # Save RAW tracked result to cache immediately after parsing
         np.save(shuttle_cache, trimmed_shuttle)
+        logger.info(f"Raw shuttle detections saved to {shuttle_cache}")
+
+    # Apply cleaning and interpolation ONLY in memory for the rest of the pipeline
+    logger.info("Cleaning false positive detections & filling gaps...")
+    trimmed_shuttle = clean_detections(trimmed_shuttle, trimmed_video_path)
+    trimmed_shuttle = fill_linear_shuttle_gaps(trimmed_shuttle, max_gap=30)
 
     if len(trimmed_shuttle) < n_trimmed: trimmed_shuttle = np.vstack([trimmed_shuttle, np.full((n_trimmed - len(trimmed_shuttle), 2), np.nan)])
     
