@@ -124,7 +124,6 @@ def estimate_poses_batched(frames, K, rvec, tvec, det_m, pose_m, batch_size=8) -
     
     for i in range(0, total_frames, batch_size):
         batch = frames[i : i + batch_size]
-        print(f"[Pose] Processing batch {i//batch_size + 1}/{(total_frames+batch_size-1)//batch_size}...", end='\r')
         
         det_results = inference_detector(det_m, batch)
         
@@ -162,10 +161,8 @@ def estimate_poses_batched(frames, K, rvec, tvec, det_m, pose_m, batch_size=8) -
                         if confs[15] > 0.3: p_obj.left_ankle_px = kps[15].tolist()
                         if confs[16] > 0.3: p_obj.right_ankle_px = kps[16].tolist()
 
-            # REMOVED: pf.near = _add_3d(...) -> Keeping .pkl strictly 2D
             results.append(pf)
             
-    print(f"\n[Pose] Finished {total_frames} frames.")
     return results
 
 

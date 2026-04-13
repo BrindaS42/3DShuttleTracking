@@ -7,7 +7,10 @@ venv310
 .early.coverage
 *.mp4
 test_assets
+test_assets_x
 results
 results_lakshya
 Shuttleset
 test_shuttlenet
+test_shuttlenet
+test_shuttlenet_x
