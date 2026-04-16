@@ -73,6 +73,44 @@ def load_pose_backend():
         print(f"[Pose] RTMPose Error: {e}")
         sys.exit(1)
 
+def get_iou(bb1, bb2):
+    """Calculates Intersection over Union for tracking persistence."""
+    x_left = max(bb1[0], bb2[0])
+    y_top = max(bb1[1], bb2[1])
+    x_right = min(bb1[2], bb2[2])
+    y_bottom = min(bb1[3], bb2[3])
+
+    if x_right < x_left or y_bottom < y_top: return 0.0
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+    bb1_area = (bb1[2] - bb1[0]) * (bb1[3] - bb1[1])
+    bb2_area = (bb2[2] - bb2[0]) * (bb2[3] - bb2[1])
+    return intersection_area / float(bb1_area + bb2_area - intersection_area)
+
+def is_valid_player(kpts, confs, bbox, court_poly, last_bbox=None):
+    """
+    Refined logic:
+    - If we have a 'last_bbox', we prioritize overlap (IOU) even if they leave the court.
+    - If NO 'last_bbox' (starting fresh), they MUST have ankles inside the court.
+    """
+    if court_poly is None: return True
+    
+    # 1. Check for temporal persistence (Tracking during jumps)
+    if last_bbox is not None:
+        if get_iou(bbox, last_bbox) > 0.15: # Overlap check
+            return True
+        # If no overlap, check if they are very close (fast movement)
+        c1 = [(bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2]
+        c2 = [(last_bbox[0]+last_bbox[2])/2, (last_bbox[1]+last_bbox[3])/2]
+        if np.linalg.norm(np.array(c1) - np.array(c2)) < 150:
+            return True
+
+    # 2. Seeding logic: If not tracked, they must be on the court floor
+    for idx in [15, 16]: 
+        if confs[idx] > 0.3:
+            pt = (float(kpts[idx][0]), float(kpts[idx][1]))
+            if cv2.pointPolygonTest(court_poly, pt, False) >= 0:
+                return True
+    return False
 
 def estimate_poses(frames, K, rvec, tvec, det_m, pose_m) -> list:
     from mmdet.apis import inference_detector
@@ -116,72 +154,112 @@ def estimate_poses(frames, K, rvec, tvec, det_m, pose_m) -> list:
     return results
 
 
-def estimate_poses_batched(frames, K, rvec, tvec, det_m, pose_m, batch_size=8) -> list:
+def estimate_poses_batched(frames, court_poly, K, rvec, tvec, det_m, pose_m, batch_size=32) -> list:
     from mmdet.apis import inference_detector
     from mmpose.apis import inference_topdown
     results = []
-    total_frames = len(frames)
     
-    for i in range(0, total_frames, batch_size):
+    # Persistence memory
+    last_near = None # Stores last [x1, y1, x2, y2]
+    last_far = None
+
+    for i in range(0, len(frames), batch_size):
         batch = frames[i : i + batch_size]
-        
         det_results = inference_detector(det_m, batch)
         
         for j, frame in enumerate(batch):
-            f_idx = i + j
-            pf = PoseFrame(f_idx)
-            
+            pf = PoseFrame(i + j)
             inst = det_results[j].pred_instances
-            boxes = inst.bboxes.cpu().numpy()
-            scores = inst.scores.cpu().numpy()
-            labels = inst.labels.cpu().numpy()
+            valid = (inst.scores.cpu().numpy() > 0.45) & (inst.labels.cpu().numpy() == 0)
+            bboxes = inst.bboxes.cpu().numpy()[valid]
             
-            valid = (scores > 0.40) & (labels == 0)
-            persons = boxes[valid]
-            h, w = frame.shape[:2]
-            mid_y = h / 2
+            if len(bboxes) == 0:
+                results.append(pf); continue
 
-            near_cands = [b for b in persons if (b[1]+b[3])/2 >= mid_y and w*0.15 < (b[0]+b[2])/2 < w*0.85]
-            far_cands  = [b for b in persons if (b[1]+b[3])/2 < mid_y and w*0.15 < (b[0]+b[2])/2 < w*0.85]
+            pose_res = inference_topdown(pose_m, frame, bboxes=bboxes)
+            candidates = []
+            for k, res in enumerate(pose_res):
+                kpts, confs = res.pred_instances.keypoints[0], res.pred_instances.keypoint_scores[0]
+                
+                # Check if this detection matches either the 'Near' or 'Far' player history
+                is_p_near = is_valid_player(kpts, confs, bboxes[k], court_poly, last_near)
+                is_p_far  = is_valid_player(kpts, confs, bboxes[k], court_poly, last_far)
 
-            for candidates, p_attr in [(near_cands, 'near'), (far_cands, 'far')]:
-                if candidates:
-                    best_box = max(candidates, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
-                    res = inference_topdown(pose_m, frame, bboxes=best_box.reshape(1, 4))
-                    if res:
-                        p_inst = res[0].pred_instances
-                        kps, confs = p_inst.keypoints[0], p_inst.keypoint_scores[0]
-                        p_obj = getattr(pf, p_attr)
-                        
-                        # Store RAW 2D Data only
-                        p_obj.keypoints = kps.tolist()
-                        p_obj.bbox      = best_box.tolist()
-                        
-                        p_obj.confidence = float(np.mean(confs[[11, 12, 15, 16]]))
-                        if confs[15] > 0.3: p_obj.left_ankle_px = kps[15].tolist()
-                        if confs[16] > 0.3: p_obj.right_ankle_px = kps[16].tolist()
+                if is_p_near or is_p_far:
+                    candidates.append({
+                        'kpts': kpts.tolist(), 'bbox': bboxes[k].tolist(),
+                        'conf': float(np.mean(confs[[11, 12, 15, 16]]))
+                    })
+
+            # --- SMART ASSIGNMENT (NOT SORTING) ---
+            if candidates:
+                # 1. Assign Near: Find candidate closest to last_near OR highest Y
+                if last_near is not None:
+                    c_near = max(candidates, key=lambda x: get_iou(x['bbox'], last_near))
+                else:
+                    c_near = max(candidates, key=lambda x: x['bbox'][3]) # Highest Y-bottom
+                
+                pf.near.keypoints, pf.near.bbox = c_near['kpts'], c_near['bbox']
+                last_near = c_near['bbox']
+                
+                # Remove assigned Near from Far consideration
+                candidates = [c for c in candidates if c['bbox'] != c_near['bbox']]
+
+            if candidates:
+                # 2. Assign Far: Find candidate closest to last_far OR lowest remaining Y
+                if last_far is not None:
+                    # Prefer overlap with previous Far position to ignore static background people
+                    c_far = max(candidates, key=lambda x: get_iou(x['bbox'], last_far))
+                else:
+                    c_far = min(candidates, key=lambda x: x['bbox'][3]) # Lowest Y-bottom
+                
+                if last_far is None or get_iou(c_far['bbox'], last_far) > 0:
+                    pf.far.keypoints, pf.far.bbox = c_far['kpts'], c_far['bbox']
+                    last_far = c_far['bbox']
 
             results.append(pf)
-            
     return results
 
 
-def render_pose_debug(frames, poses, fps, out_path, K=None, rvec=None, tvec=None):
+def render_pose_debug(frames, poses, fps, out_path, court_poly=None, K=None, rvec=None, tvec=None):
+    """
+    Improved debug renderer to verify spatial filtering.
+    - Draws the 4-corner court polygon.
+    - Draws bounding boxes for Near/Far players.
+    - Displays 3D world coordinates if calibration is provided.
+    """
     h, w = frames[0].shape[:2]
     writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    for frame, pf in zip(frames, poses):
+    
+    for i, (frame, pf) in enumerate(zip(frames, poses)):
         out = frame.copy()
-        for p, clr, tag in [(pf.near, (0,255,0), "NEAR"), (pf.far, (0,0,255), "FAR")]:
-            ankles = [px for px in [p.left_ankle_px, p.right_ankle_px] if px is not None]
-            for px in ankles: cv2.circle(out, (int(px[0]), int(px[1])), 5, clr, -1)
-            
-            # Dynamically compute 3D text if camera matrices are provided
-            if ankles and K is not None and rvec is not None and tvec is not None:
-                u_avg, v_avg = np.mean(ankles, axis=0)
-                fp = backproject_to_floor(u_avg, v_avg, K, rvec, tvec, target_z=0.0)
-                if fp is not None:
-                    v_text = f"{tag}: ({int(u_avg)},{int(v_avg)})px -> ({fp[0]:.2f}, {fp[1]:.2f})m"
-                    cv2.putText(out, v_text, (int(u_avg)-50, int(v_avg)+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+        
+        # 1. Draw the Court Polygon (The 'Allowed' Zone)
+        if court_poly is not None:
+            cv2.polylines(out, [court_poly.astype(np.int32)], True, (0, 255, 255), 2)
+
+        # 2. Draw Players
+        for p, clr, tag in [(pf.near, (0, 255, 0), "NEAR"), (pf.far, (0, 0, 255), "FAR")]:
+            if p.bbox is not None:
+                # Draw Bounding Box
+                x1, y1, x2, y2 = map(int, p.bbox)
+                cv2.rectangle(out, (x1, y1), (x2, y2), clr, 2)
+                cv2.putText(out, tag, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, clr, 2)
+                
+                # Draw Ankles
+                ankles = [px for px in [p.left_ankle_px, p.right_ankle_px] if px is not None]
+                for px in ankles:
+                    cv2.circle(out, (int(px[0]), int(px[1])), 5, clr, -1)
+                
+                # Draw 3D Position Text
+                if ankles and K is not None and rvec is not None and tvec is not None:
+                    u_avg, v_avg = np.mean(ankles, axis=0)
+                    fp = backproject_to_floor(u_avg, v_avg, K, rvec, tvec, target_z=0.0)
+                    if fp is not None:
+                        v_text = f"({fp[0]:.2f}, {fp[1]:.2f})m"
+                        cv2.putText(out, v_text, (int(u_avg)-30, int(v_avg)+25), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                                    
         writer.write(out)
     writer.release()
 
@@ -235,22 +313,51 @@ def save_poses(poses, out_dir):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", default=str(VIDEO_PATH))
-    ap.add_argument("--calib_dir", default="calib_out")
+    ap.add_argument("--calib_dir", default="results/calib_out")
     ap.add_argument("--out_dir", default=str(POSE_OUT))
     args = ap.parse_args()
 
+    # 1. Load Calibration and generate the 2D Court Polygon
+    # We use the first 4 WORLD_PTS (the floor corners) defined in config.py
+    from court_calibration import load_calibration, project_to_pixel
+    from config import WORLD_PTS 
+    
     P, K, rvec, tvec = load_calibration(args.calib_dir)
+    # Project 3D floor corners (0,0,0) to 2D pixels (u,v)
+    court_poly = project_to_pixel(WORLD_PTS[:4], P).astype(np.int32)
+    
+    # 2. Load Video
     cap = cv2.VideoCapture(args.video)
-    fps, frames = cap.get(cv2.CAP_PROP_FPS) or 30.0, []
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frames = []
     while True:
         ok, f = cap.read()
         if not ok: break
         frames.append(f)
     cap.release()
 
+    # 3. Run Batched Estimation with the Persistence Logic
     det_m, pose_m, _ = load_pose_backend()
-    poses = estimate_poses(frames, K, rvec, tvec, det_m, pose_m)
-    save_poses(poses, Path(args.out_dir))
     
-    # Pass calibration matrices to allow debug rendering of 3D coords
-    render_pose_debug(frames, poses, fps, str(Path(args.out_dir) / "pose_debug.mp4"), K, rvec, tvec)
+    # Pass the court_poly to filter out spectators behind the baseline
+    poses = estimate_poses_batched(
+        frames, 
+        court_poly, 
+        K, rvec, tvec, 
+        det_m, pose_m, 
+        batch_size=32
+    )
+    
+    # 4. Save and Render
+    out_path = Path(args.out_dir)
+    save_poses(poses, out_path)
+    
+    print(f"Rendering debug video with polygon verification to {out_path}...")
+    render_pose_debug(
+        frames, 
+        poses, 
+        fps, 
+        str(out_path / "pose_debug_verified.mp4"), 
+        court_poly=court_poly, 
+        K=K, rvec=rvec, tvec=tvec
+    )

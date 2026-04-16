@@ -9,7 +9,7 @@ ROOT          = Path(".")
 CALIB_IMAGE   = ROOT / "test_assets" /  "test_image.jpg"          # one clear broadcast frame for M1
 CALIB_OUT_DIR = ROOT / "results" / "calib_out"          # M1 → P.npy K.npy rvec.npy tvec.npy
 
-VIDEO_PATH    = ROOT / "test_assets" / "test_video.mp4"           # input video (shot clip or full rally)
+VIDEO_PATH    = ROOT / "test_assets_x" / "half_rally.mp4"           # input video (shot clip or full rally)
 TRACKNET_DIR  = ROOT / "tracknet_weights"   # folder with predict.py + *.pt
 SHUTTLE_OUT   = ROOT / "results" / "shuttle_out"        # M2 → shuttle_2d.npy
 
