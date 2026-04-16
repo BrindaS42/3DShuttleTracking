@@ -154,34 +154,48 @@ def estimate_poses(frames, K, rvec, tvec, det_m, pose_m) -> list:
     return results
 
 
-def estimate_poses_batched(frames, court_poly, K, rvec, tvec, det_m, pose_m, batch_size=32) -> list:
+# In pose_estimation.py
+
+def estimate_poses_batched(frames, court_poly, K, rvec, tvec, det_m, pose_m, 
+                           batch_size=32, first_hit_indices=None, start_idx=0) -> list:
     from mmdet.apis import inference_detector
     from mmpose.apis import inference_topdown
     results = []
     
     # Persistence memory
-    last_near = None # Stores last [x1, y1, x2, y2]
+    last_near = None 
     last_far = None
+
+    if first_hit_indices is None:
+        first_hit_indices = set()
 
     for i in range(0, len(frames), batch_size):
         batch = frames[i : i + batch_size]
         det_results = inference_detector(det_m, batch)
         
         for j, frame in enumerate(batch):
-            pf = PoseFrame(i + j)
+            global_idx = start_idx + i + j
+            
+            # FORCE RESET: If this frame is a first hit, forget previous positions
+            if global_idx in first_hit_indices:
+                last_near = None
+                last_far = None
+            
+            pf = PoseFrame(global_idx)
             inst = det_results[j].pred_instances
             valid = (inst.scores.cpu().numpy() > 0.45) & (inst.labels.cpu().numpy() == 0)
             bboxes = inst.bboxes.cpu().numpy()[valid]
             
             if len(bboxes) == 0:
-                results.append(pf); continue
+                results.append(pf)
+                continue
 
             pose_res = inference_topdown(pose_m, frame, bboxes=bboxes)
             candidates = []
             for k, res in enumerate(pose_res):
                 kpts, confs = res.pred_instances.keypoints[0], res.pred_instances.keypoint_scores[0]
                 
-                # Check if this detection matches either the 'Near' or 'Far' player history
+                # If last_near is None, is_valid_player uses Polygon Seeding
                 is_p_near = is_valid_player(kpts, confs, bboxes[k], court_poly, last_near)
                 is_p_far  = is_valid_player(kpts, confs, bboxes[k], court_poly, last_far)
 
@@ -191,31 +205,26 @@ def estimate_poses_batched(frames, court_poly, K, rvec, tvec, det_m, pose_m, bat
                         'conf': float(np.mean(confs[[11, 12, 15, 16]]))
                     })
 
-            # --- SMART ASSIGNMENT (NOT SORTING) ---
             if candidates:
-                # 1. Assign Near: Find candidate closest to last_near OR highest Y
+                # Near Assignment
                 if last_near is not None:
                     c_near = max(candidates, key=lambda x: get_iou(x['bbox'], last_near))
                 else:
-                    c_near = max(candidates, key=lambda x: x['bbox'][3]) # Highest Y-bottom
+                    c_near = max(candidates, key=lambda x: x['bbox'][3])
                 
                 pf.near.keypoints, pf.near.bbox = c_near['kpts'], c_near['bbox']
                 last_near = c_near['bbox']
-                
-                # Remove assigned Near from Far consideration
                 candidates = [c for c in candidates if c['bbox'] != c_near['bbox']]
 
             if candidates:
-                # 2. Assign Far: Find candidate closest to last_far OR lowest remaining Y
+                # Far Assignment
                 if last_far is not None:
-                    # Prefer overlap with previous Far position to ignore static background people
                     c_far = max(candidates, key=lambda x: get_iou(x['bbox'], last_far))
                 else:
-                    c_far = min(candidates, key=lambda x: x['bbox'][3]) # Lowest Y-bottom
+                    c_far = min(candidates, key=lambda x: x['bbox'][3])
                 
-                if last_far is None or get_iou(c_far['bbox'], last_far) > 0:
-                    pf.far.keypoints, pf.far.bbox = c_far['kpts'], c_far['bbox']
-                    last_far = c_far['bbox']
+                pf.far.keypoints, pf.far.bbox = c_far['kpts'], c_far['bbox']
+                last_far = c_far['bbox']
 
             results.append(pf)
     return results
@@ -310,6 +319,8 @@ def save_poses(poses, out_dir):
     with open(out_dir / "poses.pkl", "wb") as f: pickle.dump(poses, f)
 
 
+# In pose_estimation.py
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", default=str(VIDEO_PATH))
@@ -317,16 +328,12 @@ if __name__ == "__main__":
     ap.add_argument("--out_dir", default=str(POSE_OUT))
     args = ap.parse_args()
 
-    # 1. Load Calibration and generate the 2D Court Polygon
-    # We use the first 4 WORLD_PTS (the floor corners) defined in config.py
     from court_calibration import load_calibration, project_to_pixel
     from config import WORLD_PTS 
     
     P, K, rvec, tvec = load_calibration(args.calib_dir)
-    # Project 3D floor corners (0,0,0) to 2D pixels (u,v)
     court_poly = project_to_pixel(WORLD_PTS[:4], P).astype(np.int32)
     
-    # 2. Load Video
     cap = cv2.VideoCapture(args.video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frames = []
@@ -336,28 +343,24 @@ if __name__ == "__main__":
         frames.append(f)
     cap.release()
 
-    # 3. Run Batched Estimation with the Persistence Logic
     det_m, pose_m, _ = load_pose_backend()
     
-    # Pass the court_poly to filter out spectators behind the baseline
+    # FOR STANDALONE TESTING: 
+    # Treat frame 0 as the 'First Hit' to force polygon seeding at the start
+    test_first_hits = {0} 
+    
     poses = estimate_poses_batched(
         frames, 
         court_poly, 
         K, rvec, tvec, 
         det_m, pose_m, 
-        batch_size=32
+        batch_size=32,
+        first_hit_indices=test_first_hits,
+        start_idx=0
     )
     
-    # 4. Save and Render
+    # Save and Render
     out_path = Path(args.out_dir)
     save_poses(poses, out_path)
-    
-    print(f"Rendering debug video with polygon verification to {out_path}...")
-    render_pose_debug(
-        frames, 
-        poses, 
-        fps, 
-        str(out_path / "pose_debug_verified.mp4"), 
-        court_poly=court_poly, 
-        K=K, rvec=rvec, tvec=tvec
-    )
+    render_pose_debug(frames, poses, fps, str(out_path / "pose_test_single_rally.mp4"), 
+                      court_poly=court_poly, K=K, rvec=rvec, tvec=tvec)
