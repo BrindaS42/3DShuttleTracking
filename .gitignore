@@ -14,3 +14,8 @@ Shuttleset
 test_shuttlenet
 test_shuttlenet
 test_shuttlenet_x
+weights
+old_3d.py
+z.py
+z2.py
+pose_estimation_x.py

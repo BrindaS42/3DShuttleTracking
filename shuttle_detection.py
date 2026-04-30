@@ -152,7 +152,7 @@ def run_tracknet(
     expected_csv = raw_dir / f"{video_stem}_ball.csv"
 
     cmd = [
-        sys.executable, str(wd / "predict.py"),
+        sys.executable, str(wd / "predict_x.py"),
         "--video_file",     str(Path(video_path).resolve()),  # absolute
         "--tracknet_file",  str(wd / TRACKNET_PT),
         "--inpaintnet_file",str(wd / INPAINTNET_PT),
@@ -691,7 +691,7 @@ Examples
     )
 
     # ── Our args ──────────────────────────────────────────────────────────────
-    ap.add_argument("--video",    default="test_assets/half_rally.mp4",
+    ap.add_argument("--video",    default="test_assets_x/very_short.mp4",
                     help="Path to input video clip")
     ap.add_argument("--tracknet", default=str(TRACKNET_DIR),
                     help="Folder containing predict.py, TrackNet_best.pt, "

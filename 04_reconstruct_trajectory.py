@@ -100,7 +100,7 @@ def main():
         trimmed_video_path = base_out / "trimmed_temp.mp4"
         calib_dir = base_out / "calib_out"
         shuttle_cache = base_out / "shuttle_out" / "shuttle_trimmed.npy"
-        pose_cache = base_out / "pose_out" / "poses_trimmed.pkl"
+        pose_cache = base_out / "pose_out" / "poses.pkl"
 
         if not all([p.exists() for p in [trimmed_video_path, shuttle_cache, pose_cache, calib_dir/"P.npy"]]):
             logger.error(f"Missing prerequisites for {match_folder}. Check Steps 1-3.")
@@ -144,59 +144,103 @@ def main():
         frame_map = sorted(list(required_frames))
         n_trimmed = len(frame_map)
 
-        # CLEAN SHUTTLE DATA HERE
-        logger.info("Applying noise cleaning and linear gap filling to shuttle data...")
-        trimmed_shuttle = clean_detections(trimmed_shuttle, str(trimmed_video_path))
-        trimmed_shuttle = fill_linear_shuttle_gaps(trimmed_shuttle, max_gap=30)
-        if len(trimmed_shuttle) < n_trimmed: 
-            trimmed_shuttle = np.vstack([trimmed_shuttle, np.full((n_trimmed - len(trimmed_shuttle), 2), np.nan)])
-
         global_shuttle = np.full((n_total, 2), np.nan)
-        for i, orig_f in enumerate(frame_map):
-            if i < len(trimmed_shuttle): global_shuttle[orig_f] = trimmed_shuttle[i]
+        global_poses = [EmptyPoseFrame() for _ in range(n_total)]
 
-        safe_trimmed_poses = [pf if pf is not None else EmptyPoseFrame() for pf in trimmed_poses]
-        global_poses = [EmptyPoseFrame()] * n_total
+        logger.info(f"Mapping {n_trimmed} trimmed frames back to global timeline (Total: {n_total})...")
         for i, orig_f in enumerate(frame_map):
-            if i < len(safe_trimmed_poses): global_poses[orig_f] = safe_trimmed_poses[i]
+            if i < len(trimmed_shuttle):
+                global_shuttle[orig_f] = trimmed_shuttle[i]
+            if i < len(trimmed_poses):
+                global_poses[orig_f] = trimmed_poses[i]
 
         master_traj_3d = np.full((n_total, 3), np.nan)
         master_traj_2d = np.full((n_total, 2), np.nan)
         master_reproj  = np.full(n_total, np.nan)
-        
-        # Reconstruction Loop with required Logging
-        for rally_id, group in gt_df.groupby(["set_file", "rally"]):
-            hits = group.to_dict('records')
-            set_name = rally_id[0]
-            r_num = rally_id[1]
-            logger.info(f"[INFO] Source Video: {match_folder} | Set: {set_name} | Rally: {r_num} | Shots to process: {len(hits)}")
+
+        def get_ankles_safe(player_obj):
+            if player_obj is None or player_obj.keypoints is None: return None
+            kps = np.array(player_obj.keypoints)
+            if kps.shape[0] < 17: return None
+            la, ra = kps[15], kps[16] 
+            pts = [a[:2] for a in [la, ra] if not (a[0] == 0 and a[1] == 0)]
+            return pts if pts else None
+
+        def get_p3d_from_pf(pf, side):
+            p = getattr(pf, side, None)
+            ankles = get_ankles_safe(p)
+            if not ankles: return None
+            u, v = np.mean(ankles, axis=0)
+            fp = backproject_to_floor(u, v, K, rvec, tvec, target_z=0.0)
+            return np.array([fp[0], fp[1], 0.0]) if fp is not None else None
+
+        for (set_name, rally_id), group in gt_df.groupby(["set_file", "rally"]):
+            hits = group.sort_values("frame_num").to_dict('records')
+            r_start = max(0, int(group["frame_num"].min()) - 60)
+            # FIXED: +61 to match Step 1 inclusive range
+            r_end   = min(n_total, int(group["frame_num"].max()) + 61) 
             
-            for i in range(len(hits)):
-                start_frame = hits[i]["frame_num"]
-                end_frame = hits[i+1]["frame_num"] if i < len(hits)-1 else min(start_frame + 30, n_total)
-                gt_side = hits[i].get("hitter_side_gt", "Unknown")
+            logger.info(f"[RALLY] Processing Set: {set_name} | Rally: {rally_id} ({r_start} to {r_end})")
+
+            # 1. Segmented Shuttle Cleaning (prevents data bleed between merged rallies)
+            rally_shuttle = global_shuttle[r_start:r_end].copy()
+            rel_hits = [int(h["frame_num"]) - r_start for h in hits]
+            rally_shuttle = clean_detections(rally_shuttle, str(trimmed_video_path), hit_frames=rel_hits)
+            rally_shuttle = fill_linear_shuttle_gaps(rally_shuttle, max_gap=30)
+            
+            # 2. Smart Player Pose Interpolation (fills "undetected" gaps)
+            rally_poses = global_poses[r_start:r_end]
+            player_paths = {"near": np.full((len(rally_poses), 3), np.nan), 
+                            "far": np.full((len(rally_poses), 3), np.nan)}
+            
+            for side in ["near", "far"]:
+                for t, pf in enumerate(rally_poses):
+                    p3d = get_p3d_from_pf(pf, side)
+                    if p3d is not None: player_paths[side][t] = p3d
                 
+                # Linearly interpolate gaps for this player within the rally
+                valid_t = np.where(~np.any(np.isnan(player_paths[side]), axis=1))[0]
+                if len(valid_t) > 0:
+                    for axis in range(3):
+                        if len(valid_t) > 1:
+                            player_paths[side][:, axis] = np.interp(np.arange(len(rally_poses)), valid_t, player_paths[side][valid_t, axis])
+                        else:
+                            player_paths[side][:, axis] = player_paths[side][valid_t[0], axis]
+                else:
+                    # Fallback if player is NEVER detected: Mid-court near or far side
+                    player_paths[side][:] = [3.05, (2.0 if side=="near" else 11.4), 0.0]
+
+            # 3. Physics Reconstruction per Shot (Hit-to-Hit logic)
+            for i in range(len(hits)):
+                f_hit  = int(hits[i]["frame_num"])
+                # Hit-to-Hit OR Last Shot + 30 frames trailing buffer
+                f_next = int(hits[i+1]["frame_num"]) if i < len(hits)-1 else min(f_hit + 31, n_total)
+                
+                gt_side = hits[i].get("hitter_side_gt", "Unknown")
                 if gt_side not in ["Top", "Bottom"]: continue
                 h_side = "far" if gt_side == "Top" else "near"
-                other_side = "near" if h_side == "far" else "far"
+                r_side = "near" if h_side == "far" else "far"
+
+                shot_shuttle = rally_shuttle[f_hit - r_start : f_next - r_start]
+                hitter_3d    = player_paths[h_side][f_hit - r_start]
+                receiver_3d  = player_paths[r_side][(f_next-1) - r_start]
                 
-                shot_shuttle = global_shuttle[start_frame:end_frame]
-                hitter_3d = get_player_3d(global_poses, start_frame, h_side, K, rvec, tvec, use_floor=False)
-                recv_idx = min(end_frame - 1, n_total - 1)
-                receiver_3d = get_player_3d(global_poses, recv_idx, other_side, K, rvec, tvec, use_floor=False)
-                
-                if hitter_3d is None or receiver_3d is None: continue
-                    
+                if len(shot_shuttle) < 3: continue # Need at least 3 detections for physics
+
                 try:
-                    res = reconstruct(shot_shuttle, P, hitter_3d, receiver_3d, fps, h_side)
-                    if res["converged"]:
-                        actual_len = min(start_frame + len(res["traj_3d"]), n_total) - start_frame
-                        if actual_len > 0:
-                            master_traj_3d[start_frame:start_frame+actual_len] = res["traj_3d"][:actual_len]
-                            master_traj_2d[start_frame:start_frame+actual_len] = res["traj_2d_proj"][:actual_len]
-                            master_reproj[start_frame:start_frame+actual_len] = res["reproj_err"][:actual_len]
+                    if np.sum(~np.any(np.isnan(shot_shuttle), axis=1)) >= 3:
+                        res = reconstruct(shot_shuttle, P, hitter_3d, receiver_3d, fps, h_side)
+                        if res["converged"]:
+                            actual_len = len(res["traj_3d"])
+                            e_idx = min(f_hit + actual_len, n_total)
+                            s_len = e_idx - f_hit
+                            
+                            master_traj_3d[f_hit:e_idx] = res["traj_3d"][:s_len]
+                            master_traj_2d[f_hit:e_idx] = res["traj_2d_proj"][:s_len]
+                            master_reproj[f_hit:e_idx]  = res["reproj_err"][:s_len]
+                            logger.info(f"  [Shot {i+1}] {f_hit}->{f_next}: Success")
                 except Exception as e:
-                    logger.error(f"  [!] Reconstruct failed at frame {start_frame}: {e}")
+                    logger.error(f"  [Shot {i+1}] f{f_hit}: Reconstruction failed: {e}")
 
         logger.info("Extracting and saving trimmed trajectory data...")
         

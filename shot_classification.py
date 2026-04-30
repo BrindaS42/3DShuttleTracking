@@ -34,7 +34,7 @@ from pose_estimation import load_pose_backend, estimate_poses_batched, render_po
 from stroke_classification.preparing_data.shuttleset_dataset import (
     get_merged_stroke_types, get_bone_pairs, make_seq_len_same, create_bones
 )
-from stroke_classification.model.bst import BST_CG_AP
+from stroke_classification.model.bst_2d import BST_CG_AP
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')

@@ -92,7 +92,7 @@ class BST_0(nn.Module):
             raise NotImplementedError
 
         self.tcn_pose = TCN(in_dim, [d_model, d_model], tcn_kernel_size, drop_p)
-        self.tcn_shuttle = TCN(2, [d_model // 2, d_model], tcn_kernel_size, drop_p)
+        self.tcn_shuttle = TCN(3, [d_model // 2, d_model], tcn_kernel_size, drop_p)
 
         # Temporal TransformerLayers
         self.learned_token_tem = nn.Parameter(torch.randn(1, d_model))
@@ -226,8 +226,7 @@ class BST(nn.Module):
         self.mlp_positions = MLP(2, out_dim=in_dim, hd_dim=256, drop_p=drop_p)
 
         self.tcn_pose = TCN(in_dim, [d_model, d_model], tcn_kernel_size, drop_p)
-        self.tcn_shuttle = TCN(2, [d_model // 2, d_model], tcn_kernel_size, drop_p)
-
+        self.tcn_shuttle = TCN(3, [d_model // 2, d_model], tcn_kernel_size, drop_p)
         # Temporal TransformerLayers
         self.learned_token_tem = nn.Parameter(torch.randn(1, d_model))
         self.embedding_tem = nn.Parameter(torch.empty(1, 1+seq_len, d_model))
@@ -368,7 +367,7 @@ class BST_CG(nn.Module):
         self.mlp_positions = MLP(2, out_dim=in_dim, hd_dim=256, drop_p=drop_p)
 
         self.tcn_pose = TCN(in_dim, [d_model, d_model], tcn_kernel_size, drop_p)
-        self.tcn_shuttle = TCN(2, [d_model // 2, d_model], tcn_kernel_size, drop_p)
+        self.tcn_shuttle = TCN(3, [d_model // 2, d_model], tcn_kernel_size, drop_p)
 
         # Temporal TransformerLayers
         self.learned_token_tem = nn.Parameter(torch.randn(1, d_model))
@@ -518,7 +517,7 @@ class BST_AP(nn.Module):
         self.mlp_positions = MLP(2, out_dim=in_dim, hd_dim=256, drop_p=drop_p)
 
         self.tcn_pose = TCN(in_dim, [d_model, d_model], tcn_kernel_size, drop_p)
-        self.tcn_shuttle = TCN(2, [d_model // 2, d_model], tcn_kernel_size, drop_p)
+        self.tcn_shuttle = TCN(3, [d_model // 2, d_model], tcn_kernel_size, drop_p)
 
         # Temporal TransformerLayers
         self.learned_token_tem = nn.Parameter(torch.randn(1, d_model))
@@ -672,7 +671,7 @@ class BST_CG_AP(nn.Module):
         self.mlp_positions = MLP(2, out_dim=in_dim, hd_dim=256, drop_p=drop_p)
 
         self.tcn_pose = TCN(in_dim, [d_model, d_model], tcn_kernel_size, drop_p)
-        self.tcn_shuttle = TCN(2, [d_model // 2, d_model], tcn_kernel_size, drop_p)
+        self.tcn_shuttle = TCN(3, [d_model // 2, d_model], tcn_kernel_size, drop_p)
 
         # Temporal TransformerLayers
         self.learned_token_tem = nn.Parameter(torch.randn(1, d_model))
