@@ -1,0 +1,11 @@
+__pycache__
+*.mp4
+*.png
+*.jpg
+.env
+.venv310
+cache
+.early.coverage
+*.npy
+*.pkl
+*.pt

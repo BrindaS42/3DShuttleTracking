@@ -1,0 +1,17 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+gradio
+huggingface_hub
+roboflow
+opencv-python
+numpy>=1.22.4
+pandas
+torch
+torchvision
+scipy
+tqdm
+opencv-python-headless
+inference-sdk
+positional-encodings
+torchinfo
+ffmpeg-python
+python-dotenv
