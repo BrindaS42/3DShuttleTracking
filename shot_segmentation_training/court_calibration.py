@@ -64,11 +64,6 @@ def annotate(image_path: str) -> np.ndarray:
     fig, ax = plt.subplots(figsize=(16, 10))
     ax.imshow(rgb)
     ax.set_title(
-        "MODULE 1 — Court Calibration\n"
-        "STEP 1: zoom/pan with toolbar    STEP 2: click 6 points in order\n"
-        "  1=Near-L corner   2=Near-R corner   3=Far-R corner\n"
-        "  4=Far-L corner    5=Left post tip   6=Right post tip\n"
-        "  ● Click INNER edge of white lines; post tip = top of yellow cap",
         fontsize=10, fontweight="bold", loc="left",
     )
 

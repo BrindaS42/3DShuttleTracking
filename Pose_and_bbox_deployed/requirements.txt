@@ -1,0 +1,9 @@
+gradio
+ultralytics
+chumpy-fork
+scipy
+numpy<2.0.0
+opencv-python-headless
+setuptools==69.5.1
+openmim
+torch 

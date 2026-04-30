@@ -10,7 +10,7 @@ The dataset used is ShuttleSet, same as the Shot Classification algorithm.
 - Python ≥ 3.10
 - `ultralytics` (for YOLOv8 pipeline)
 - `opencv-python`, `pandas`, `scipy`, `matplotlib`, `tqdm`
-- Pre-computed Pose (`.pkl`) and Shuttle (`.npy`) data[cite: 6, 7]
+- Pre-computed Pose (`.pkl`) and Shuttle (`.npy`) data
 
 ```bash
 pip install ultralytics opencv-python pandas scipy matplotlib tqdm
@@ -22,15 +22,15 @@ pip install ultralytics opencv-python pandas scipy matplotlib tqdm
 
 The system supports two pipelines for **HD-A** (Action Detection):
 
-### 1. Heuristic Pipeline (`main.py`)
+### 1. Heuristic Pipeline (`heuristic_main.py`)
 Uses hand-crafted pose features to detect swings. It calculates four primary signals from keypoints:
-*   **Wrist Acceleration:** Frame-to-frame velocity gradients.[cite: 4]
-*   **Arm Extension:** Shoulder-elbow-wrist angles.[cite: 4]
-*   **Ankle Displacement:** Detects foot-planting/lunging.[cite: 4]
-*   **Bbox Area Rate:** Identifies explosive lunges or jumps.[cite: 4]
+*   **Wrist Acceleration:** Frame-to-frame velocity gradients.
+*   **Arm Extension:** Shoulder-elbow-wrist angles.
+*   **Ankle Displacement:** Detects foot-planting/lunging.
+*   **Bbox Area Rate:** Identifies explosive lunges or jumps.
 
-### 2. YOLO Pipeline (`main_2.py`)
-Uses a trained **YOLOv8-cls** model to classify player crops into `swing` or `not_swing`. It has a **Dual-Stage Peak Suppression** strategy to find hit moments by using both YOLO detections and trajectory peaks.[cite: 2, 5]
+### 2. YOLO Pipeline (`yolo_main.py')
+Uses a trained **YOLOv8-cls** model to classify player crops into `swing` or `not_swing`. It has a **Dual-Stage Peak Suppression** strategy to find hit moments by using both YOLO detections and trajectory peaks.
 
 ---
 
@@ -38,9 +38,9 @@ Uses a trained **YOLOv8-cls** model to classify player crops into `swing` or `no
 
 ### Shot Refinement Algorithm (`SRA`)
 It resolves detections using the following:
-*   **Segment Building:** Merges consecutive action detections by the same player.[cite: 4, 5]
-*   **Intersection:** Matches action segments against **HD-T** trajectory peaks.[cite: 4, 5]
-*   **Refinement:** If multiple peaks exist in a segment, it picks the one closest to the action confidence peak; if no peak exists, it uses the action peak itself.[cite: 4, 5]
+*   **Segment Building:** Merges consecutive action detections by the same player.
+*   **Intersection:** Matches action segments against **HD-T** trajectory peaks.
+*   **Refinement:** If multiple peaks exist in a segment, it picks the one closest to the action confidence peak; if no peak exists, it uses the action peak itself.
 
 ### Trajectory Smoothing (`HD-T`)
 Uses a three-step process to clean raw shuttle detections. This is the same method used in shuttle tracking.
@@ -51,8 +51,8 @@ Uses a three-step process to clean raw shuttle detections. This is the same meth
 
 To use the YOLO pipeline, you must first train the swing classifier:
 
-1.  **Dataset Construction:** Extracts positive crops (centered on ground-truth hits) and negative crops (random rally movement).[cite: 6]
-2.  **Fine-tuning:** Trains `yolov8s-cls` for 30 epochs on the extracted crops.[cite: 6]
+1.  **Dataset Construction:** Extracts positive crops (centered on ground-truth hits) and negative crops (random rally movement).
+2.  **Fine-tuning:** Trains `yolov8s-cls` for 30 epochs on the extracted crops.
 
 ```bash
 python training.py
@@ -74,9 +74,9 @@ python yolo_main.py
 ```
 
 ### Metrics & Reporting
-The pipeline evaluates performance using **t-IoU (Temporal Intersection over Union)** at thresholds of **0.5, 0.85, and 0.95**.[cite: 2]
+The pipeline evaluates performance using **t-IoU (Temporal Intersection over Union)** at thresholds of **0.5, 0.85, and 0.95**.
 *   **Precision/Recall/F1:** Calculated based on matched shot intervals.
-*   **Outputs:** Results are saved to `results/` as CSV logs, PNG plots, and a `predictions.json` file.[cite: 1, 2]
+*   **Outputs:** Results are saved to `results/` as CSV logs, PNG plots, and a `predictions.json` file.
 
 ---
 
@@ -93,4 +93,4 @@ data/
         │   └── poses_trimmed.pkl
         └── shuttle_out/
             └── shuttle_trimmed.npy
-```[cite: 6, 7]
+```
