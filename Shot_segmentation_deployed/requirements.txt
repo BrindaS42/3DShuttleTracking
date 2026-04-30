@@ -1,0 +1,8 @@
+gradio
+ultralytics
+opencv-python
+numpy
+pandas
+tqdm
+torch
+torchvision
