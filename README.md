@@ -70,7 +70,16 @@ ROBOFLOW_WORKFLOW_ID=your_workflow
 HF_TOKEN=your_hugging_face_token
 HF_SHUTTLE_SPACE = briii6/shuttle_detactor
 ```
-### Run Application 
+
+The following roboflow models need to be used for court calibration
+```bash
+court corner detection - https://app.roboflow.com/tanmays-workspace-lj0mt/court_detection-olm2c/models
+netline detection - https://app.roboflow.com/tanmays-workspace-lj0mt/netline/models/netline/1
+```
+The following roboflow workflow has been used in this project
+```bash
+workspace_name="tanmays-workspace-lj0mt",
+workflow_id="netline-detection-pipeline-1777334463089",
 ```bash
 gradio app.py
 ```
