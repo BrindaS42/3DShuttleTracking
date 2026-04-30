@@ -50,6 +50,7 @@ The system reconstructs shuttle motion in 3D space by mapping 2D detections into
 - Python 3.10+
 - Roboflow API Key
 - Hugging Face API Token
+- [Download the Weights from here](https://drive.google.com/drive/folders/1P-t5z0vrIdcS_7WFX7smh2T7SeWLFbJe?usp=drive_link) 
 
 ### Setup
 ```bash
@@ -58,6 +59,7 @@ cd 3DShuttleTracking
 cd full_webapp_deployed
 pip install -r requirements.txt
 ```
+add the weight named **best_bst_5d_global.pt** to the folder named **stroke**
 
 ### Environment Configuration
 Create a .env file in the root directory:
