@@ -1,347 +1,136 @@
-# MonoTrack — Shuttlecock 3-D Trajectory Reconstruction
+# Badminton Shuttlecock 3D Trajectory & Shot Classification
 
-Reconstruct the full **X, Y, Z trajectory** of a badminton shuttlecock from a **single monocular broadcast camera**, with no stereo rig and no manual annotation beyond a one-time court calibration.
-
-Based on **MonoTrack** (Liu & Wang, CVPR 2022), extended with an independent `fx / fy` intrinsic optimiser, player tracking and a fully modular codebase.
-
----
-
-## How it works
-
-```
-broadcast frame ──► Module 1 ──► P matrix (3×4)
-                                      │
-video clip ──────► Module 2 ──► shuttle_2d.npy  (u,v) per frame
-                │                     │
-                └────► Module 3 ──► poses.pkl    player 3-D positions
-                                      │
-              ┌───────────────────────┘
-              ▼
-          Module 4  ──  physics optimiser
-              │         minimises: σ·Lr + ‖x(0)−xH‖² + ‖x(tR)−xR‖² + dOut²
-              ▼
-       trajectory_3d.npy   (N_frames × 3)  world-space X, Y, Z
-       output_annotated.mp4
-       trajectory_plots.png
-       accuracy_report.txt
-```
-
-**Module 1** clicks 6 visible court landmarks on one static frame and solves the camera projection matrix P (3 × 4) via PnP with an independent `fx / fy / cx / cy` optimiser — no square-pixel assumption.
-
-**Module 2** calls TrackNetV3 to detect the shuttle pixel position `(u, v)` in every frame, then applies light Gaussian smoothing and short-gap interpolation.
-
-**Module 3** runs pose detection to find both players' ankle positions per frame, then back-projects them onto the court floor to get 3-D player positions used as physics priors.
-
-**Module 4** integrates a gravity + quadratic-drag ODE and optimises 7 parameters — initial position `x₀`, initial velocity `v₀`, and drag coefficient `Cd` — by minimising the reprojection loss plus player-position and out-of-court penalties.
-
----
-
-## Project structure
-
-```
-project/
-│
-├── config.py                      ← edit once: all paths + court constants
-│
-├── court_calibration.py   ← interactive P-matrix estimation
-├── shuttle_detection.py   ← TrackNetV3 wrapper + post-processing
-├── pose_estimation.py     ← player tracking
-├── trajectory.py          ← physics optimiser + annotated video
-│
-├── run_pipeline.py                ← one-command orchestrator
-├── requirements.txt
-│
-├── tracknet_weights/             
-│   ├── predict.py
-│   ├── tracknet_best.pt
-│   └── inpaintnet_best.pt
-│
-├── frame.jpg                      ← one clear broadcast frame (for M1)
-├── clip.mp4                       ← your shot video (for M2–M4)
-│
-├── calib_out/                     ← created by M1
-│   ├── P.npy
-│   ├── K.npy
-│   ├── rvec.npy
-│   ├── tvec.npy
-│   └── calib_result.png
-│
-├── shuttle_out/                   ← created by M2
-│   ├── shuttle_2d.npy
-│   ├── shuttle_detection.mp4
-│   └── detection_stats.txt
-│
-├── pose_out/                      ← created by M3
-│   ├── poses.pkl
-│   └── pose_debug.mp4
-│
-└── traj_out/                      ← created by M4
-    ├── trajectory_3d.npy
-    ├── output_annotated.mp4
-    ├── trajectory_plots.png
-    └── accuracy_report.txt
-```
+Reconstruct the full **X, Y, Z trajectory** of a badminton shuttlecock from a single monocular broadcast camera, then classify shot types using fused 2D+3D features.
 
 ---
 
 ## Requirements
 
-- **Python ≥ 3.10**
-- **TrackNetV3** weights + `predict.py` (obtain from the [TrackNetV3 repo](https://github.com/qaz812345/TrackNetV3))
-- A clear static broadcast frame (`frame.jpg`) for the one-time calibration
-- A video clip of the shot or rally (`clip.mp4`)
-
----
-
-## Installation
-
-### Step 1 — clone and install core dependencies
+- Python ≥ 3.10
+- TrackNetV3 weights + `predict.py` → place in `tracknet_weights/`
+- ShuttleSet dataset CSVs → place in `shuttleset/set/<match_name>/`
+- Match videos → place in `test_assets/`
 
 ```bash
-git clone <your-repo-url>
-cd monotrack
 pip install -r requirements.txt
 ```
->Reaname tha name as tracknet_weights & add 
 
-```bash
-cp /path/to/tracknet_best.pt    tracknet_weights/
-cp /path/to/inpaintnet_best.pt  tracknet_weights/
-cp /path/to/predict.py          tracknet_weights/
+---
+
+## Pipeline Overview
+
 ```
-
-### Step 2 — install PyTorch (TrackNetV3 needs it)
-
-Pick the build matching your hardware from [pytorch.org](https://pytorch.org/get-started/locally/):
-
-```bash
-# CPU only
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
-# CUDA 12.1
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+test_assets/<match>.mp4
+        │
+        ├─► 01_trim_and_calibrate.py  ──► P.npy, trimmed_temp.mp4
+        ├─► 02_detect_shuttle.py      ──► shuttle_trimmed.npy
+        ├─► 03_estimate_pose.py       ──► poses.pkl
+        ├─► 04_reconstruct_trajectory.py ──► traj_3d_trimmed.npy
+        │
+        ├─► 07_split_matchwise.py     ──► train/val/test_data.pkl
+        └─► 08_5D_train_pipeline.py   ──► best_bst_5d_global.pt
 ```
 
 ---
 
-## Quick start
+## Modules
 
-### Run everything end-to-end
+### Module 1 : Court Calibration (`01_trim_and_calibrate.py`)
 
-```bash
-python run_pipeline.py \
-    --video  clip.mp4 \
-    --image  frame.jpg \
-    --hitter near
-```
+Reads each match video from `test_assets/`, trims it to only the frames containing rally action (±60 frames around each hit), and runs an interactive calibration to compute the camera projection matrix **P** (3×4).
 
-### Re-run only the trajectory optimiser (modules 1–3 already done)
+During calibration, you click **6 court landmarks** on a broadcast frame in this order:
 
-```bash
-python run_pipeline.py \
-    --video  clip.mp4 \
-    --hitter near \
-    --only_traj
-```
+| # | Point |
+|---|-------|
+| 1 | Near-Left corner |
+| 2 | Near-Right corner |
+| 3 | Far-Right corner |
+| 4 | Far-Left corner |
+| 5 | Left net post tip |
+| 6 | Right net post tip |
 
-### Run each module individually
+Click the **inner edge** of white court lines, and the **very top** of the net post cap. The optimiser independently solves `fx`, `fy`, `cx`, `cy` : no square-pixel assumption : then polishes with Levenberg-Marquardt.
 
-```bash
-# M1 — one-time calibration on any clear broadcast frame
-python module1_court_calibration.py --image frame.jpg --out_dir calib_out
-
-# M2 — shuttle detection on the shot clip
-python module2_shuttle_detection.py --video clip.mp4 \
-    --tracknet tracknet_weights --out_dir shuttle_out
-
-# M3 — player pose estimation
-python module3_pose_estimation.py --video clip.mp4 \
-    --calib_dir calib_out --out_dir pose_out
-
-# M4 — 3-D trajectory reconstruction
-python module4_trajectory.py --video clip.mp4 \
-    --calib_dir  calib_out \
-    --shuttle_dir shuttle_out \
-    --pose_dir   pose_out \
-    --hitter     near \
-    --hit_frame  0 \
-    --out_dir    traj_out
-```
+**Outputs:** `calib_out/P.npy`, `K.npy`, `rvec.npy`, `tvec.npy`, `trimmed_temp.mp4`
 
 ---
 
-## Module reference
+### Module 2 : Shuttle Detection (`02_detect_shuttle.py`)
 
-### Module 1 — Court calibration
+Runs **TrackNetV3** on the trimmed video to detect the shuttlecock pixel position `(u, v)` in every frame. Raw detections are saved without any gap-filling so downstream modules can apply context-aware cleaning.
 
-**Script:** `module1_court_calibration.py`
-
-Opens an interactive matplotlib window on a broadcast frame. You click 6 landmarks in order, then the module solves the 3 × 4 projection matrix P.
-
-**The 6 annotation points**
-
-| # | Name | Where to click |
-|---|------|----------------|
-| 1 | Near-Left corner | Inner-edge intersection of the white lines at the near-left baseline corner |
-| 2 | Near-Right corner | Same, near-right |
-| 3 | Far-Right corner | Inner-edge intersection at the far-right baseline corner |
-| 4 | Far-Left corner | Same, far-left |
-| 5 | Left net post tip | Top-centre of the yellow pole cap on the left |
-| 6 | Right net post tip | Top-centre of the yellow pole cap on the right |
-
-> **Click the inner edge of white court lines**, not the outer edge. Lines are ~40 mm wide; outer vs inner is a 3–5 px annotation error that propagates into Z.
->
-> **For net posts**, zoom in first with the toolbar. Click the very top of the metal cap — NOT the net tape, which sits 2–3 cm lower.
-
-**How the intrinsics optimiser works**
-
-Standard calibration assumes square pixels (`fx = fy`). Broadcast telephoto lenses rarely satisfy this. Even a 0.3% aspect difference causes ~5 px systematic error on off-floor points (the net posts). The optimiser uses `scipy.optimize.minimize` with L-BFGS-B to find `fx`, `fy`, `cx`, `cy` independently, then runs a Levenberg-Marquardt sub-pixel polish with `cv2.solvePnPRefineLM`.
-
-**Outputs**
-
-| File | Description |
-|------|-------------|
-| `calib_out/P.npy` | 3 × 4 projection matrix (float64, normalised so P[2,3] = 1) |
-| `calib_out/K.npy` | 3 × 3 intrinsic matrix |
-| `calib_out/rvec.npy` | 3 × 1 rotation vector |
-| `calib_out/tvec.npy` | 3 × 1 translation vector |
-| `calib_out/calib_result.png` | Visual overlay: clicks vs reprojections + court wireframe |
-
-**Expected reprojection error**
-
-| Error | Quality |
-|-------|---------|
-| < 2 px | Excellent |
-| 2–5 px | Good |
-| 5–10 px | Acceptable |
-| > 10 px | Re-annotate |
+**Outputs:** `shuttle_out/shuttle_trimmed.npy` : shape `(N, 2)`, `NaN` where undetected
 
 ---
 
-### Module 2 — Shuttle detection
+### Module 3 : Pose Estimation (`03_estimate_pose.py`)
 
-**Script:** `module2_shuttle_detection.py`
+Detects both players per frame using a custom YOLOv8 player detector + RTMPose keypoints. Each player's ankle pixels are back-projected onto the court floor (z = 0) using the calibrated P matrix to obtain 3D floor positions. Players are assigned *near* (lower in frame) and *far* (upper in frame) roles, with state reset at each rally boundary.
 
-Wraps TrackNetV3's `predict.py` as a subprocess, parses the output CSV into a clean `(N_frames, 2)` NumPy array, applies post-processing, and saves for Module 4.
-
-**Post-processing steps**
-
-1. **Gaussian smoothing** (`σ = 1.2`) on detected positions only — reduces sub-pixel jitter from TrackNet without affecting NaN (undetected) frames.
-2. **Gap interpolation** — linearly fills gaps of ≤ 5 consecutive undetected frames. Longer gaps (occlusion, shuttle out of frame) are left as NaN and handled correctly by the physics optimiser.
-
-**Detection quality guide**
-
-| Detection rate | Impact on Z reconstruction |
-|---------------|---------------------------|
-| > 80% | Excellent |
-| 60–80% | Good |
-| < 60% | Poor — Z accuracy will degrade |
-
-**Outputs**
-
-| File | Description |
-|------|-------------|
-| `shuttle_out/shuttle_2d.npy` | `(N_frames, 2)` float64; `NaN` = undetected |
-| `shuttle_out/shuttle_detection.mp4` | Debug video with green dot + amber trail |
-| `shuttle_out/detection_stats.txt` | Detection rate and quality grade |
+**Outputs:** `poses.pkl` : list of `PoseFrame` objects (one per trimmed frame), each with `near` and `far` player keypoints and floor positions
 
 ---
 
-### Module 3 — Pose estimation
+### Module 4 : 3D Trajectory Reconstruction (`04_reconstruct_trajectory.py`)
 
-**Script:** `pose_estimation.py`
-
-Estimates both players' positions per frame and back-projects their averaged ankle pixels onto the court floor plane (z = 0) using the calibrated P matrix.
-
-**Backend selection (automatic)**
-
-The module tries backends in this order and uses the first available:
-
-| Priority | Backend | Notes |
-|----------|---------|-------|
-| 1 | RTMPose-m (mmpose) | Best accuracy. Needs `mim install`. |
-| 2 | MediaPipe Pose | CPU-friendly. `pip install mediapipe`. |
-| 3 | Disabled | Player priors turned off in M4. Still works. |
-
-Override with `--backend rtmpose|mediapipe|auto|none`.
-
-**Why ankle keypoints?**
-
-The ankle is the closest visible body part to the floor. Back-projecting the average of both ankles to z = 0 gives the player's floor position. Adding `PLAYER_HEIGHT / 2` (default 1.75 m / 2 = 0.875 m) gives the body centre, which the physics optimiser uses as a prior for where the shuttle starts and ends each shot.
-
-**Player assignment** (near vs far) is determined by vertical pixel position: the player with the larger y-coordinate (lower in the frame) is the near player.
-
-**Outputs**
-
-| File | Description |
-|------|-------------|
-| `pose_out/poses.pkl` | `list[PoseFrame]` — one entry per video frame with ankle pixels and 3-D floor positions |
-| `pose_out/pose_debug.mp4` | Video with ankle circles (green = near, blue = far) and court-coordinate labels |
-
----
-
-### 3-D trajectory reconstruction
-
-**Script:** `trajectory.py`
-
-The core of the pipeline. Reconstructs the full 3-D trajectory by solving a constrained nonlinear optimisation problem over the physics of shuttle flight.
-
-**Physics model**
-
-The shuttle is modelled as a particle under gravity and quadratic air drag:
+Reconstructs the full 3D trajectory for each shot using a **physics optimiser**. The shuttle is modelled under gravity and quadratic air drag:
 
 ```
 d²x/dt² = g − Cd · ‖v‖² · v
 ```
 
-where `g = (0, 0, −9.81) m/s²` and `Cd` is the drag coefficient (optimised per shot since feathers degrade during a rally).
-
-**Optimisation**
-
-The optimiser (L-BFGS-B → Levenberg-Marquardt polish) finds 7 parameters:
+The optimiser (L-BFGS-B) finds 7 parameters : initial position `x₀`, velocity `v₀`, drag `Cd` : by minimising:
 
 ```
-params = [x₀(3),  v₀(3),  log(Cd)]
+L = σ·Lr  +  ‖x(0) − xH‖²  +  ‖x(tR) − xR‖²  +  dOut²
 ```
 
-by minimising the full MonoTrack loss (paper Eq. 4):
+where `Lr` is reprojection error, `xH`/`xR` are hitter/receiver positions from Module 3, and `dOut` penalises landing outside the court.
 
+**Coordinate system:** Origin = near-left corner | X = width (0→6.7 m) | Y = length (0→13.4 m) | Z = height
+
+**Outputs:** `traj_out/<match>_traj_3d_trimmed.npy`, `_traj_2d_trimmed.npy`, overlay video
+
+---
+
+## Shot Classification Training
+
+### Step 5 : Dataset Preparation (`07_split_matchwise.py`)
+
+Validates all processed matches and performs an **80/10/10 match-wise split** (train/val/test) to prevent data leakage across matches. For each shot, a 100-frame window centred on the hit frame is extracted, containing:
+
+- **Pose features:** 17 COCO keypoints + 19 bone vectors per player → `(100, 2, 72)`
+- **2D shuttle:** normalised `(u, v)` → `(100, 2)`
+- **3D shuttle:** world-space `(X, Y, Z)` → `(100, 3)`
+- **Label:** 35 stroke types (side × shot type from ShuttleSet)
+
+**Outputs:** `weights/dataset_cache/train_data.pkl`, `val_data.pkl`, `test_data.pkl`
+
+### Step 6 : 5D Fusion Training (`08_5D_train_pipeline.py`)
+
+Trains the **BST-CG-AP** model with fused 2D+3D shuttle input (`s5d` : 5 channels). Uses AdamW with cosine warmup scheduling, label smoothing, and early stopping (patience = 25).
+
+Evaluation metrics: Top-1 Accuracy, Top-2 Accuracy, Macro-F1, Min-F1.
+
+```bash
+# Ensure bst_5d.py exists in stroke_classification/model/ before running
+python 08_5D_train_pipeline.py
 ```
-L = σ · Lr  +  ‖x(0) − xH‖²  +  ‖x(tR) − xR‖²  +  dOut²
-```
 
-| Term | Meaning |
-|------|---------|
-| `Lr` | Mean squared reprojection error: project 3-D trajectory back to 2-D and compare against TrackNet detections |
-| `‖x(0) − xH‖²` | Hitter position prior from Module 3 |
-| `‖x(tR) − xR‖²` | Receiver position prior from Module 3 |
-| `dOut²` | Distance the shuttle lands outside the court (0 if it lands inside) |
-| `σ = 1/‖P‖²` | Scale factor that balances pixel-space and world-space terms |
+**Outputs:** `weights/checkpoints/best_bst_5d_global.pt`
 
-**Constraints enforced as soft penalties**
+---
 
-- Initial height `z₀ ∈ [0, 3.0]` m
-- Initial speed `‖v₀‖ ≤ 120 m/s` (≈ 432 kph)
-- Starting position on the hitter's half of the court
-- Initial velocity directed toward the opponent
+## Running the Full Pipeline
 
-**Outputs**
-
-| File | Description |
-|------|-------------|
-| `traj_out/trajectory_3d.npy` | `(N_frames, 3)` float64 — world-space X, Y, Z per frame |
-| `traj_out/output_annotated.mp4` | Original video with X/Y/Z overlay + projected amber trail |
-| `traj_out/trajectory_plots.png` | 4-panel: 3-D view, bird-eye (colour = height), Z over time, reprojection error |
-| `traj_out/accuracy_report.txt` | Full numeric report: error stats, speed, net clearance, quality grade |
-
-**Coordinate system**
-
-```
-Origin: near-left corner of the doubles court
-
-X ──►  court width   (0 → 6.7 m)
-Y ──►  court length  (0 → 13.4 m)
-Z  ↑   height above floor  (0 = floor)
+```bash
+python 01_trim_and_calibrate.py    # Trim videos + court calibration
+python 02_detect_shuttle.py        # Shuttle detection
+python 03_estimate_pose.py         # Player pose estimation
+python 04_reconstruct_trajectory.py # 3D trajectory reconstruction
+python 07_split_matchwise.py       # Prepare dataset splits
+python 08_5D_train_pipeline.py     # Train shot classifier
 ```
 
 ---
@@ -350,12 +139,20 @@ Z  ↑   height above floor  (0 = floor)
 
 ```bibtex
 @inproceedings{liu2022monotrack,
-  title     = {MonoTrack: Shuttle trajectory reconstruction from
-               monocular badminton video},
-  author    = {Liu, Paul and Wang, Jui-Hsien},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer
-               Vision and Pattern Recognition (CVPR)},
-  year      = {2022}
+  title  = {MonoTrack: Shuttle trajectory reconstruction from monocular badminton video},
+  author = {Liu, Paul and Wang, Jui-Hsien},
+  booktitle = {CVPR},
+  year   = {2022}
+}
+```
+
+```bibtex
+@article{2502.21085,
+  author = {Authors of BST},
+  title = {BST: Badminton Stroke-type Transformer for Skeleton-based Action Recognition in Racket Sports},
+  journal = {arXiv preprint arXiv:2502.21085},
+  year = {2025},
+  url = {https://arxiv.org/abs/2502.21085}
 }
 ```
 
